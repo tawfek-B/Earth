@@ -225,6 +225,9 @@ ambientLightFolder.addColor(ambientLight, 'color');
 const earthGroup = new THREE.Group();
 scene.add(earthGroup);
 
+// Set initial Earth position
+earthGroup.position.set(SCALE_FACTORS.EARTH_ORBIT_RADIUS, 0, 0);
+
 // Add orbit controls
 const controls = new OrbitControls(camera, canvas);
 controls.enableDamping = true;
@@ -257,20 +260,20 @@ const textureLoader = new THREE.TextureLoader();
 // Create Earth with textures
 const earthGeometry = new THREE.SphereGeometry(6.371, 64, 64); // Earth radius in thousands of km
 const earthMaterial = new THREE.MeshStandardMaterial({
-    map: textureLoader.load('textures/Earth/Albedo.jpg', (texture) => {
+    map: textureLoader.load('/textures/Earth/Albedo.jpg', (texture) => {
         texture.wrapS = THREE.RepeatWrapping;
         texture.wrapT = THREE.RepeatWrapping;
         texture.flipY = true;
         texture.anisotropy = 16;
     }),
-    bumpMap: textureLoader.load('textures/Earth/Bump.jpg', (texture) => {
+    bumpMap: textureLoader.load('/textures/Earth/Bump.jpg', (texture) => {
         texture.wrapS = THREE.RepeatWrapping;
         texture.wrapT = THREE.RepeatWrapping;
         texture.flipY = true;
         texture.anisotropy = 16;
     }),
     bumpScale: 0.05,
-    roughnessMap: textureLoader.load('textures/Earth/Albedo.jpg', (texture) => {
+    roughnessMap: textureLoader.load('/textures/Earth/Albedo.jpg', (texture) => {
         texture.wrapS = THREE.RepeatWrapping;
         texture.wrapT = THREE.RepeatWrapping;
         texture.flipY = true;
@@ -300,6 +303,8 @@ const cloudMaterial = new THREE.MeshStandardMaterial({
     opacity: 0.4
 });
 const clouds = new THREE.Mesh(cloudGeometry, cloudMaterial);
+// Set initial cloud rotation to match Earth's rotation
+clouds.rotation.y = earth.rotation.y;
 earthGroup.add(clouds);
 
 // Debug folder for clouds
@@ -392,9 +397,59 @@ orbitsFolder.add({ speed: 1 }, 'speed', 0, 10000, 0.1).onChange((value) => {
     timeScale = value; // Use the time scale to control all orbital speeds
 }).name('Orbit Speed');
 
+// Create Moon
+const moonGeometry = new THREE.SphereGeometry(1.737, 128, 128); // Moon radius in thousands of km
+const moonMaterial = new THREE.MeshStandardMaterial({
+    map: textureLoader.load('/textures/Moon/moonmap4k.jpg', (texture) => {
+        texture.wrapS = THREE.RepeatWrapping;
+        texture.wrapT = THREE.RepeatWrapping;
+        texture.flipY = true;
+        texture.anisotropy = 16;
+    }),
+    bumpMap: textureLoader.load('/textures/Moon/moonbump4k.jpg', (texture) => {
+        texture.wrapS = THREE.RepeatWrapping;
+        texture.wrapT = THREE.RepeatWrapping;
+        texture.flipY = true;
+        texture.anisotropy = 16;
+    }),
+    bumpScale: 0.025,
+    roughness: 0.8,
+    metalness: 0.1
+});
+
+const moon = new THREE.Mesh(moonGeometry, moonMaterial);
+scene.add(moon);
+
+// Initialize moon physics properties
+const G = 6.67430e-11; // Gravitational constant
+const M_EARTH = 5.972e24; // Earth mass
+const M_MOON = 7.342e22; // Moon mass
+const SCALE_FACTOR = 1e-6; // Scale factor for visualization
+const VELOCITY_SCALE = 1e-6; // Reduced velocity scale
+
+// Set initial Moon position relative to Earth
+moon.position.set(
+    earthGroup.position.x + SCALE_FACTORS.MOON_ORBIT_RADIUS,
+    earthGroup.position.y,
+    earthGroup.position.z
+);
+
+// Calculate initial velocity for circular orbit
+const orbitalSpeed = Math.sqrt((G * M_EARTH) / (SCALE_FACTORS.MOON_ORBIT_RADIUS * SCALE_FACTOR)) * VELOCITY_SCALE;
+// Set initial velocity perpendicular to the Earth-Moon direction
+const initialVelocity = new THREE.Vector3(0, 0, orbitalSpeed);
+moon.userData = {
+    initialized: true,
+    velocity: initialVelocity,
+    mass: M_MOON
+};
+
 // Create ISS group
 const issGroup = new THREE.Group();
-earthGroup.add(issGroup); // Add to Earth group instead of scene
+earthGroup.add(issGroup);
+
+// Set initial ISS position
+issGroup.position.set(SCALE_FACTORS.ISS_ORBIT_RADIUS, 0, 0);
 
 // Load ISS model
 const gltfLoader = new GLTFLoader();
@@ -414,40 +469,6 @@ const issOrbitRadius = 6.771; // ISS orbits at ~400km above Earth's surface (Ear
 let issOrbitSpeed = 2 * Math.PI / 5400; // ISS orbits once every 90 minutes (5400 seconds)
 let issOrbitalAngle = 0;
 
-// Set initial ISS position
-issGroup.position.set(issOrbitRadius, 0, 0);
-
-// Create Moon
-const moonGeometry = new THREE.SphereGeometry(1.737, 128, 128); // Moon radius in thousands of km
-const moonMaterial = new THREE.MeshStandardMaterial({
-    map: textureLoader.load('textures/Moon/moonmap4k.jpg', (texture) => {
-        texture.wrapS = THREE.RepeatWrapping;
-        texture.wrapT = THREE.RepeatWrapping;
-        texture.flipY = true;
-        texture.anisotropy = 16;
-    }),
-    bumpMap: textureLoader.load('textures/Moon/moonbump4k.jpg', (texture) => {
-        texture.wrapS = THREE.RepeatWrapping;
-        texture.wrapT = THREE.RepeatWrapping;
-        texture.flipY = true;
-        texture.anisotropy = 16;
-    }),
-    bumpScale: 0.025,
-    roughness: 0.8,
-    metalness: 0.1,
-    normalScale: new THREE.Vector2(1, 1)
-});
-
-const moon = new THREE.Mesh(moonGeometry, moonMaterial);
-earthGroup.add(moon); // Add Moon to Earth group
-moon.position.set(SCALE_FACTORS.MOON_ORBIT_RADIUS, 0, 0); // Set initial position
-
-console.log(earthGroup)
-
-const moonFolder = gui.addFolder('Moon');
-moonFolder.add(moon.material, 'bumpScale', 0, 2, 0.001);
-
-
 // Camera target management
 const cameraTargetManager = {
     targets: {},
@@ -462,17 +483,9 @@ const cameraTargetManager = {
     init() {
         this.targets = {
             Sun: sunGroup.position,
-            Earth: earthGroup.position,
+            Earth: earthGroup.position.clone(), // Clone the position to avoid reference issues
             Moon: new THREE.Vector3(),
-            ISS: new THREE.Vector3(),
-            Mercury: new THREE.Vector3(),
-            Venus: new THREE.Vector3(),
-            Mars: new THREE.Vector3(),
-            Jupiter: new THREE.Vector3(),
-            Saturn: new THREE.Vector3(),
-            Uranus: new THREE.Vector3(),
-            Neptune: new THREE.Vector3(),
-            Pluto: new THREE.Vector3()
+            ISS: new THREE.Vector3()
         };
 
         // Set initial target
@@ -491,83 +504,200 @@ const cameraTargetManager = {
         });
     },
 
+    calculateCameraPosition(target) {
+        console.log('Calculating camera position for target:', this.currentTarget);
+        console.log('Target position:', target);
+
+        let cameraPosition;
+        if (this.currentTarget === 'Sun') {
+            cameraPosition = new THREE.Vector3(0, 0, 100);
+        } else if (this.currentTarget === 'ISS') {
+            cameraPosition = target.clone().add(new THREE.Vector3(0, 5, 10));
+        } else if (this.currentTarget === 'Moon') {
+            cameraPosition = target.clone().add(new THREE.Vector3(0, 5, 15));
+        } else if (this.currentTarget === 'Earth') {
+            // Adjusted Earth camera position
+            cameraPosition = target.clone().add(new THREE.Vector3(0, 20, 50));
+        } else {
+            cameraPosition = target.clone().add(new THREE.Vector3(0, 50 * 0.4, 50));
+        }
+
+        console.log('Final camera position:', cameraPosition);
+        return cameraPosition;
+    },
+
     update() {
+        // Physics constants
+        const dt = 0.016 * timeScale; // Time step
+        const FORCE_SCALE = 1e-20; // Scale factor for force
+
+        // Update Earth's position in orbit
+        const earthOrbitAngle = (Date.now() / 1000) * (2 * Math.PI / ORBITAL_PERIODS.EARTH);
+        earthGroup.position.x = Math.cos(earthOrbitAngle) * SCALE_FACTORS.EARTH_ORBIT_RADIUS;
+        earthGroup.position.z = Math.sin(earthOrbitAngle) * SCALE_FACTORS.EARTH_ORBIT_RADIUS;
+
         // Update target positions
-        this.targets.Earth = earthGroup.position;
+        this.targets.Earth.copy(earthGroup.position);
+        this.targets.Sun.copy(sunGroup.position);
+        issGroup.getWorldPosition(this.targets.ISS);
+
+        // Get Earth and Moon objects
+        const earth = earthGroup.children[0];
+        const moon = scene.children.find(child => child instanceof THREE.Mesh && child !== earth);
+        moon.getWorldPosition(this.targets.Moon);
+
+        // Calculate distance vector between Earth and Moon
+        const distance = new THREE.Vector3().subVectors(moon.position, earthGroup.position);
+        const distanceMagnitude = distance.length();
+
+        // Calculate gravitational force with adjustable multiplier
+        const baseForce = (G * M_EARTH * M_MOON) / (distanceMagnitude * distanceMagnitude);
+        const forceMagnitude = baseForce * FORCE_SCALE * physicsDebug.gravityForce;
+        const forceDirection = distance.normalize();
+        const force = forceDirection.multiplyScalar(forceMagnitude);
+
+        // Calculate acceleration
+        const moonAcceleration = force.clone().divideScalar(M_MOON).negate();
+        
+        // Log the values for debugging
+        console.log('Physics Debug:', {
+            gravityForce: physicsDebug.gravityForce,
+            baseForce: baseForce,
+            forceMagnitude: forceMagnitude,
+            acceleration: moonAcceleration.length(),
+            distance: distanceMagnitude,
+            velocity: moon.userData.velocity.length()
+        });
+
+        // Update velocity
+        const moonVelocityChange = moonAcceleration.clone().multiplyScalar(dt);
+        moon.userData.velocity.add(moonVelocityChange);
+
+        // Update position
+        const moonPositionChange = moon.userData.velocity.clone().multiplyScalar(dt);
+        moon.position.add(moonPositionChange);
+
+        // Reset moon if it gets too far from Earth
+        const maxDistance = SCALE_FACTORS.MOON_ORBIT_RADIUS * 2;
+        if (distanceMagnitude > maxDistance) {
+            console.warn('Moon too far from Earth, resetting...');
+            moon.position.set(
+                earthGroup.position.x + SCALE_FACTORS.MOON_ORBIT_RADIUS,
+                earthGroup.position.y,
+                earthGroup.position.z
+            );
+            const orbitalSpeed = Math.sqrt((G * M_EARTH) / (SCALE_FACTORS.MOON_ORBIT_RADIUS * SCALE_FACTOR)) * VELOCITY_SCALE;
+            // Set velocity perpendicular to the Earth-Moon direction
+            const tangentDirection = new THREE.Vector3(-distance.z, 0, distance.x).normalize();
+            moon.userData.velocity = tangentDirection.multiplyScalar(orbitalSpeed);
+        }
+
+        // Update debug vectors
+        if (physicsDebug.showForceVector) {
+            debugVectors.force.setDirection(forceDirection);
+            debugVectors.force.setLength(forceMagnitude * 1000);
+            debugVectors.force.position.copy(moon.position);
+        }
+        debugVectors.force.visible = physicsDebug.showForceVector;
+
+        if (physicsDebug.showVelocityVector) {
+            debugVectors.velocity.setDirection(moon.userData.velocity.normalize());
+            debugVectors.velocity.setLength(moon.userData.velocity.length() * 1000);
+            debugVectors.velocity.position.copy(moon.position);
+        }
+        debugVectors.velocity.visible = physicsDebug.showVelocityVector;
+
+        if (physicsDebug.showAccelerationVector) {
+            debugVectors.acceleration.setDirection(moonAcceleration.normalize());
+            debugVectors.acceleration.setLength(moonAcceleration.length() * 10000);
+            debugVectors.acceleration.position.copy(moon.position);
+        }
+        debugVectors.acceleration.visible = physicsDebug.showAccelerationVector;
+
+        // Add debug info to panel
+        if (physicsDebug.showEnergy || physicsDebug.showAngularMomentum) {
+            const kineticEnergy = 0.5 * M_MOON * moon.userData.velocity.lengthSq();
+            const potentialEnergy = -(G * M_EARTH * M_MOON) / distanceMagnitude * physicsDebug.gravityForce;
+            const totalEnergy = kineticEnergy + potentialEnergy;
+            
+            const angularMomentum = distance.clone().cross(moon.userData.velocity).multiplyScalar(M_MOON);
+            
+            debugPanel.innerHTML = `
+                ${physicsDebug.showEnergy ? `Total Energy: ${totalEnergy.toExponential(2)} J<br>` : ''}
+                ${physicsDebug.showAngularMomentum ? `Angular Momentum: ${angularMomentum.length().toExponential(2)} kg⋅m²/s<br>` : ''}
+                Force Magnitude: ${forceMagnitude.toExponential(2)} N<br>
+                Acceleration: ${moonAcceleration.length().toExponential(2)} m/s²<br>
+                Distance: ${distanceMagnitude.toFixed(2)} units<br>
+                Velocity: ${moon.userData.velocity.length().toExponential(2)} m/s<br>
+                Gravity Multiplier: ${physicsDebug.gravityForce.toFixed(2)}x
+            `;
+        }
+
+        // Update Moon trail
+        if (physicsDebug.showTrail) {
+            const positions = moonTrail.geometry.attributes.position.array;
+            
+            // Shift all points back by one position
+            for (let i = positions.length - 3; i > 0; i -= 3) {
+                positions[i] = positions[i - 3];
+                positions[i + 1] = positions[i - 2];
+                positions[i + 2] = positions[i - 1];
+            }
+            
+            // Add new point at the beginning
+            positions[0] = moon.position.x;
+            positions[1] = moon.position.y;
+            positions[2] = moon.position.z;
+            
+            // Update the number of points to draw
+            const newCount = Math.min(moonTrail.geometry.drawRange.count + 1, physicsDebug.trailLength);
+            moonTrail.geometry.setDrawRange(0, newCount);
+            moonTrail.geometry.attributes.position.needsUpdate = true;
+            moonTrail.geometry.computeBoundingSphere();
+        }
+        moonTrail.visible = physicsDebug.showTrail;
+
+        // Update Earth's rotation
+        earth.rotation.y += (2 * Math.PI / (23.93 * 3600)) * dt;
+        // Keep clouds rotation synchronized with Earth's rotation
+        clouds.rotation.y = earth.rotation.y;
+
+        // Update Moon's rotation (tidally locked)
+        moon.rotation.y += (2 * Math.PI / (27.32 * 24 * 3600)) * dt;
+
+        // Update target positions
+        this.targets.Earth = earth.position;
         this.targets.Sun = sunGroup.position;
         moon.getWorldPosition(this.targets.Moon);
         issGroup.getWorldPosition(this.targets.ISS);
-
-        // Update Mercury position
-        const mercury = planets.getPlanets().children[0];
-        const venus = planets.getPlanets().children[1];
-        const mars = planets.getPlanets().children[2];
-        const jupiter = planets.getPlanets().children[3];
-        const saturn = planets.getPlanets().children[4];
-        const uranus = planets.getPlanets().children[5];
-        const neptune = planets.getPlanets().children[6];
-        const pluto = planets.getPlanets().children[7];
-        if (mercury) {
-            mercury.getWorldPosition(this.targets.Mercury);
-        }
-        if (venus) {
-            venus.getWorldPosition(this.targets.Venus);
-        }
-        if (mars) {
-            mars.getWorldPosition(this.targets.Mars);
-        }
-        if (jupiter) {
-            jupiter.getWorldPosition(this.targets.Jupiter);
-        }
-        if (saturn) {
-            saturn.getWorldPosition(this.targets.Saturn);
-        }
-        if (uranus) {
-            uranus.getWorldPosition(this.targets.Uranus);
-        }
-        if (neptune) {
-            neptune.getWorldPosition(this.targets.Neptune);
-        }
-        if (pluto) {
-            pluto.getWorldPosition(this.targets.Pluto);
-        }
 
         // Handle camera transition
         if (this.isTransitioning) {
             const target = this.targets[this.currentTarget];
             const desiredPosition = this.calculateCameraPosition(target);
-            const distanceToTarget = camera.position.distanceTo(desiredPosition);
-            const targetDistance = this.targetPosition.distanceTo(target);
+            
+            // Validate target position
+            if (target && !isNaN(target.x) && !isNaN(target.y) && !isNaN(target.z)) {
+                camera.position.lerp(desiredPosition, this.TRANSITION_SPEED);
+                this.targetPosition.lerp(target, this.TRANSITION_SPEED);
+                controls.target.copy(this.targetPosition);
 
-            camera.position.lerp(desiredPosition, this.TRANSITION_SPEED);
-            this.targetPosition.lerp(target, this.TRANSITION_SPEED);
-            controls.target.copy(this.targetPosition);
+                const distanceToTarget = camera.position.distanceTo(desiredPosition);
+                const targetDistance = this.targetPosition.distanceTo(target);
 
-            if (distanceToTarget < this.DISTANCE_THRESHOLD && targetDistance < this.DISTANCE_THRESHOLD) {
-                this.isTransitioning = false;
-                controls.enabled = true;
-                camera.position.copy(desiredPosition);
-                this.targetPosition.copy(target);
-                controls.target.copy(target);
+                if (distanceToTarget < this.DISTANCE_THRESHOLD && targetDistance < this.DISTANCE_THRESHOLD) {
+                    this.isTransitioning = false;
+                    controls.enabled = true;
+                    camera.position.copy(desiredPosition);
+                    this.targetPosition.copy(target);
+                    controls.target.copy(target);
+                }
             } else {
+                console.warn('Invalid target position detected');
+                this.isTransitioning = false;
                 controls.enabled = true;
             }
         }
-    },
-
-    calculateCameraPosition(target) {
-        if (this.currentTarget === 'Sun') return new THREE.Vector3(0, 0, 100);
-        if (this.currentTarget === 'ISS') return target.clone().add(new THREE.Vector3(0, 5, 10));
-        if (this.currentTarget === 'Moon') return target.clone().add(new THREE.Vector3(0, 10, 20));
-        if (this.currentTarget === 'Mercury') return target.clone().add(new THREE.Vector3(0, 15 * 0.4, 15));
-        if (this.currentTarget === 'Venus') return target.clone().add(new THREE.Vector3(0, 15 * 0.4, 15));
-        if (this.currentTarget === 'Mars') return target.clone().add(new THREE.Vector3(0, 20 * 0.4, 20));
-        if (this.currentTarget === 'Jupiter') return target.clone().add(new THREE.Vector3(0, 200 * 0.4, 200));
-        if (this.currentTarget === 'Saturn') return target.clone().add(new THREE.Vector3(0, 180 * 0.4, 180));
-        if (this.currentTarget === 'Uranus') return target.clone().add(new THREE.Vector3(0, 100 * 0.4, 100));
-        if (this.currentTarget === 'Neptune') return target.clone().add(new THREE.Vector3(0, 100 * 0.4, 100));
-        if (this.currentTarget === 'Pluto') return target.clone().add(new THREE.Vector3(0, 10 * 0.4, 10));
-        return target.clone().add(new THREE.Vector3(0, 50 * 0.4, 50));
     }
 };
 
@@ -580,7 +710,6 @@ function renderLoop() {
     const delta = Math.max(clock.getDelta(), 0.0001);
 
     // Update planets and celestial bodies
-    updateOrbits(delta);
     cameraTargetManager.update();
     updateControls();
 
@@ -765,12 +894,14 @@ function updatePositionsFromDate(date, delta) {
     earthGroup.position.x = earthPos.x * SCALE_FACTORS.AU_TO_UNITS;
     earthGroup.position.z = earthPos.y * SCALE_FACTORS.AU_TO_UNITS;
 
-    // Update Moon position relative to Earth
-    const moonAngle = (time * (2 * Math.PI / ORBITAL_PERIODS.MOON)) % (2 * Math.PI);
-    const moonX = SCALE_FACTORS.MOON_ORBIT_RADIUS * Math.cos(moonAngle);
-    const moonZ = SCALE_FACTORS.MOON_ORBIT_RADIUS * Math.sin(moonAngle);
-    moon.position.set(moonX, 0, moonZ);
-    moonOrbitalAngle = moonAngle;
+    // Only update Moon position if gravity force is at default value
+    if (physicsDebug.gravityForce === 1.0) {
+        const moonAngle = (time * (2 * Math.PI / ORBITAL_PERIODS.MOON)) % (2 * Math.PI);
+        const moonX = SCALE_FACTORS.MOON_ORBIT_RADIUS * Math.cos(moonAngle);
+        const moonZ = SCALE_FACTORS.MOON_ORBIT_RADIUS * Math.sin(moonAngle);
+        moon.position.set(moonX, 0, moonZ);
+        moonOrbitalAngle = moonAngle;
+    }
 
     // Update ISS position relative to Earth
     issOrbitalAngle += (2 * Math.PI / 5400) * delta * timeScale; // ISS orbits every 90 minutes
@@ -783,32 +914,6 @@ function updatePositionsFromDate(date, delta) {
     if (issModel) {
         issModel.rotation.y = issOrbitalAngle + Math.PI / 2;
     }
-}
-
-// Update the updateOrbits function
-function updateOrbits(delta) {
-    // Update simulation time
-    simulationTime = new Date(simulationTime.getTime() + delta * timeScale * 1000);
-
-    // Update time display
-    timeDisplay.textContent = `Simulation Time: ${simulationTime.toLocaleString()}`;
-
-    // Update positions based on current date
-    updatePositionsFromDate(simulationTime, delta);
-
-    // Update rotations with time scaling
-    earth.rotation.y += delta * timeScale * (2 * Math.PI / ROTATION_PERIODS.EARTH);
-    clouds.rotation.y += delta * timeScale * (2 * Math.PI / ROTATION_PERIODS.EARTH);
-    moon.rotation.y += delta * timeScale * (2 * Math.PI / ORBITAL_PERIODS.MOON); // Moon is tidally locked
-
-    // Update planet rotations with time scaling
-    Object.entries(planets).forEach(([planetName, planet]) => {
-        if (planet && ROTATION_PERIODS[planetName.toUpperCase()]) {
-            const rotationPeriod = ROTATION_PERIODS[planetName.toUpperCase()];
-            const direction = planetName.toLowerCase() === 'venus' ? -1 : 1;
-            planet.rotation.y += direction * delta * timeScale * (2 * Math.PI / rotationPeriod);
-        }
-    });
 }
 
 function updateControls() {
@@ -827,5 +932,126 @@ function updateControls() {
 // Create clock for timing
 const clock = new THREE.Clock();
 
+// Create debug visualization objects
+const debugVectors = {
+    force: new THREE.ArrowHelper(
+        new THREE.Vector3(),
+        new THREE.Vector3(),
+        1,
+        0xff0000
+    ),
+    velocity: new THREE.ArrowHelper(
+        new THREE.Vector3(),
+        new THREE.Vector3(),
+        1,
+        0x00ff00
+    ),
+    acceleration: new THREE.ArrowHelper(
+        new THREE.Vector3(),
+        new THREE.Vector3(),
+        1,
+        0x0000ff
+    )
+};
+
+// Add debug vectors to scene instead of earthGroup
+Object.values(debugVectors).forEach(vector => scene.add(vector));
+
+// Create Moon trail
+const moonTrailGeometry = new THREE.BufferGeometry();
+const moonTrailMaterial = new THREE.LineBasicMaterial({
+    color: 0x00ff00,
+    transparent: true,
+    opacity: 0.5
+});
+
+// Initialize trail positions array
+const trailLength = 1000; // Maximum number of points in the trail
+const positions = new Float32Array(trailLength * 3); // 3 values (x,y,z) per point
+
+// Initialize all positions to the Moon's initial position
+const initialMoonPosition = new THREE.Vector3(
+    earthGroup.position.x + SCALE_FACTORS.MOON_ORBIT_RADIUS,
+    earthGroup.position.y,
+    earthGroup.position.z
+);
+for (let i = 0; i < trailLength * 3; i += 3) {
+    positions[i] = initialMoonPosition.x;
+    positions[i + 1] = initialMoonPosition.y;
+    positions[i + 2] = initialMoonPosition.z;
+}
+
+moonTrailGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+moonTrailGeometry.setDrawRange(0, 1); // Start with one point drawn
+moonTrailGeometry.computeBoundingSphere();
+
+const moonTrail = new THREE.Line(moonTrailGeometry, moonTrailMaterial);
+scene.add(moonTrail); // Add to scene instead of earthGroup
+
+// Create debug panel
+const debugPanel = document.createElement('div');
+debugPanel.style.position = 'absolute';
+debugPanel.style.top = '50px';
+debugPanel.style.left = '10px';
+debugPanel.style.color = 'white';
+debugPanel.style.fontFamily = 'Arial';
+debugPanel.style.fontSize = '14px';
+debugPanel.style.textShadow = '2px 2px 4px rgba(0,0,0,0.5)';
+debugPanel.style.backgroundColor = 'rgba(0,0,0,0.5)';
+debugPanel.style.padding = '10px';
+debugPanel.style.borderRadius = '5px';
+document.body.appendChild(debugPanel);
+
+// Add physics debug controls to GUI
+const physicsFolder = gui.addFolder('Physics Debug');
+const physicsDebug = {
+    showForceVector: true,
+    showVelocityVector: true,
+    showAccelerationVector: true,
+    showTrail: true,
+    trailLength: 100,
+    forceScale: 1e-20,
+    showOrbitalElements: true,
+    showEnergy: true,
+    showAngularMomentum: true,
+    gravityForce: 1.0 // New control for gravity force
+};
+
+physicsFolder.add(physicsDebug, 'showForceVector').name('Show Force Vector');
+physicsFolder.add(physicsDebug, 'showVelocityVector').name('Show Velocity Vector');
+physicsFolder.add(physicsDebug, 'showAccelerationVector').name('Show Acceleration Vector');
+physicsFolder.add(physicsDebug, 'showTrail').name('Show Moon Trail');
+physicsFolder.add(physicsDebug, 'trailLength', 10, 500).name('Trail Length');
+physicsFolder.add(physicsDebug, 'forceScale', 1e-20, 100, 0.01).name('Force Scale');
+physicsFolder.add(physicsDebug, 'showOrbitalElements').name('Show Orbital Elements');
+physicsFolder.add(physicsDebug, 'showEnergy').name('Show Energy');
+physicsFolder.add(physicsDebug, 'showAngularMomentum').name('Show Angular Momentum');
+physicsFolder.add(physicsDebug, 'gravityForce', 0.1, 10.0, 0.1).name('Gravity Force Multiplier').onChange((value) => {
+    // Reset moon position and velocity when gravity force changes
+    const moon = scene.children.find(child => child instanceof THREE.Mesh && child !== earthGroup.children[0]);
+    if (moon) {
+        moon.position.set(
+            earthGroup.position.x + SCALE_FACTORS.MOON_ORBIT_RADIUS,
+            earthGroup.position.y,
+            earthGroup.position.z
+        );
+        const orbitalSpeed = Math.sqrt((G * M_EARTH) / (SCALE_FACTORS.MOON_ORBIT_RADIUS * SCALE_FACTOR)) * VELOCITY_SCALE;
+        // Set velocity perpendicular to the Earth-Moon direction
+        const distance = new THREE.Vector3().subVectors(moon.position, earthGroup.position);
+        const tangentDirection = new THREE.Vector3(-distance.z, 0, distance.x).normalize();
+        moon.userData.velocity = tangentDirection.multiplyScalar(orbitalSpeed);
+    }
+});
+
 // Initialize
 renderLoop();
+
+// Add debug logging function at the top of the file
+function debugLog(category, message, data = null) {
+    const timestamp = new Date().toISOString();
+    const logMessage = `[${timestamp}] [${category}] ${message}`;
+    console.log(logMessage);
+    if (data) {
+        console.log('Data:', data);
+    }
+}

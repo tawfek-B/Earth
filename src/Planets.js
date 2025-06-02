@@ -232,14 +232,14 @@ export class Planets {
         this.neptune = neptune;
         this.pluto = pluto;
         
-        this.planetsGroup.add(mercury);
-        this.planetsGroup.add(venus);
-        this.planetsGroup.add(mars);
-        this.planetsGroup.add(jupiter);
-        this.planetsGroup.add(saturn);
-        this.planetsGroup.add(uranus);
-        this.planetsGroup.add(neptune);
-        this.planetsGroup.add(pluto);
+        // this.planetsGroup.add(mercury);
+        // this.planetsGroup.add(venus);
+        // this.planetsGroup.add(mars);
+        // this.planetsGroup.add(jupiter);
+        // this.planetsGroup.add(saturn);
+        // this.planetsGroup.add(uranus);
+        // this.planetsGroup.add(neptune);
+        // this.planetsGroup.add(pluto);
 
         // Start the animation loop
         this.animate();
