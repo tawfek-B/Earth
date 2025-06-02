@@ -3,7 +3,7 @@ import { ImprovedNoise } from 'three/examples/jsm/math/ImprovedNoise.js';
 
 export class Sun {
     constructor() {
-        this.sunTexture = 'textures/sun-map.jpg';
+        this.sunTexture = 'textures/8k_sun.jpg';
         this.group = new THREE.Group();
         this.loader = new THREE.TextureLoader();
 
@@ -28,7 +28,7 @@ export class Sun {
         const sunGeometry = new THREE.SphereBufferGeometry(20, 128, 128);
         const sunMaterial = new THREE.MeshStandardMaterial({
             map,
-            emissive: new THREE.Color(0xffff99),
+            emissive: new THREE.Color(0x111100),
             emissiveIntensity: 1.5,
         });
         const sunMesh = new THREE.Mesh(sunGeometry, sunMaterial);
@@ -49,7 +49,7 @@ export class Sun {
     createCorona() {
         try {
             // Create geometry and material
-            const coronaGeometry = new THREE.IcosahedronGeometry(4.9, 12);
+            const coronaGeometry = new THREE.SphereBufferGeometry(20.5, 128, 12812);
             const coronaMaterial = new THREE.MeshBasicMaterial({
                 color: 0xff0000,
                 side: THREE.BackSide,
@@ -165,7 +165,7 @@ export class Sun {
                 transparent: true,
                 blending: THREE.AdditiveBlending,
             });
-            const sunGlowGeometry = new THREE.IcosahedronGeometry(5, 12);
+            const sunGlowGeometry = new THREE.SphereBufferGeometry(20.5, 128, 128);
             const sunGlowMesh = new THREE.Mesh(sunGlowGeometry, sunGlowMaterial);
             sunGlowMesh.scale.setScalar(1.1);
             this.glow = sunGlowMesh;
@@ -225,7 +225,7 @@ export class Sun {
                 transparent: true,
                 blending: THREE.AdditiveBlending,
             });
-            const sunRimGeometry = new THREE.IcosahedronGeometry(5, 12);
+            const sunRimGeometry = new THREE.SphereBufferGeometry(20.5, 128, 128);
             const sunRimMesh = new THREE.Mesh(sunRimGeometry, sunRimMaterial);
             sunRimMesh.scale.setScalar(1.01);
             this.sunRim = sunRimMesh;
@@ -237,9 +237,9 @@ export class Sun {
 
     addLighting() {
         try {
-            const sunLight = new THREE.PointLight(0xffff99, 2);
-            sunLight.position.set(0, 0, 0);
-            this.group.add(sunLight);
+            this.sunLight = new THREE.PointLight(0xffff99, 2);
+            this.sunLight.position.set(0, 0, 0);
+            this.group.add(this.sunLight);
         } catch (error) {
             console.error('Error adding lighting:', error);
         }
