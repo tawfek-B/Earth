@@ -12,11 +12,18 @@ const planets = new Planets();
 
 // Constants
 const CONSTANTS = {
+    LEO: 0.16,
+    MEO: 2,
+    GEO: 35.786,
+    GEOMAX: 42.157,
     MOUSE_SENSITIVITY: 0.002,
     MOVE_SPEED: 0.5,
     EARTH_ORBIT_RADIUS: 5000,
-    MOON_ORBIT_RADIUS: 12.8,
+    MOON_MASS: 7.342e22, // kg
+    MOON_ORBIT_RADIUS: 12.8, // semi-major axis (a)
+    MOON_ECCENTRICITY: 0.0549, // default Moon eccentricity
     ISS_ORBIT_RADIUS: 4,
+    EARTH_MOON_GRAVITY: 6.67430e-11, // Gravitational constant
     CAMERA_DISTANCES: {
         Sun: 100,
         ISS: 10,
@@ -77,12 +84,31 @@ const ORBITAL_SPEEDS = {
     NEPTUNE: 2 * Math.PI / 5200416000, // 164.79 years
     PLUTO: 2 * Math.PI / 7819488000    // 248.09 years
 };
+const canvas = document.querySelector('canvas.webgl');
 
 /**
  * Base
  */
 // Canvas
-const canvas = document.querySelector('canvas.webgl');
+// Ensure a wrapper div exists around the canvas
+let wrapper = document.getElementById('webgl-wrapper');
+if (!wrapper) {
+    wrapper = document.createElement('div');
+    wrapper.id = 'webgl-wrapper';
+    wrapper.style.position = 'relative';
+    wrapper.style.width = '100vw';
+    wrapper.style.height = '100vh';
+    // Insert wrapper before canvas and move canvas inside
+    if (canvas.parentNode) {
+        canvas.parentNode.insertBefore(wrapper, canvas);
+        wrapper.appendChild(canvas);
+    } else {
+        document.body.appendChild(wrapper);
+        wrapper.appendChild(canvas);
+    }
+} else {
+    wrapper.style.position = 'relative';
+}
 
 /**
  * Debug
@@ -110,6 +136,10 @@ camera.position.z = 30;
 scene.add(camera);
 
 // Movement state
+let cameraTargetLock = true;
+let freeLook = false;
+let yaw = 0;
+let pitch = 0;
 const movementState = {
     isDragging: false,
     previousMousePosition: { x: 0, y: 0 },
@@ -119,7 +149,9 @@ const movementState = {
         left: false,
         right: false,
         up: false,
-        down: false
+        down: false,
+        shift: false,
+        x: false
     }
 };
 
@@ -137,9 +169,20 @@ const setupEventListeners = () => {
             x: event.clientX - movementState.previousMousePosition.x,
             y: event.clientY - movementState.previousMousePosition.y
         };
-        camera.rotation.y -= deltaMove.x * CONSTANTS.MOUSE_SENSITIVITY;
-        camera.rotation.x -= deltaMove.y * CONSTANTS.MOUSE_SENSITIVITY;
-        camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, camera.rotation.x));
+        if (freeLook) {
+            // FPS look: rotate camera using yaw/pitch
+            yaw -= deltaMove.x * CONSTANTS.MOUSE_SENSITIVITY;
+            pitch -= deltaMove.y * CONSTANTS.MOUSE_SENSITIVITY;
+            pitch = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, pitch));
+            camera.rotation.order = 'YXZ';
+            camera.rotation.y = yaw;
+            camera.rotation.x = pitch;
+        } else {
+            // Orbit look
+            camera.rotation.y -= deltaMove.x * CONSTANTS.MOUSE_SENSITIVITY;
+            camera.rotation.x -= deltaMove.y * CONSTANTS.MOUSE_SENSITIVITY;
+            camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, camera.rotation.x));
+        }
         movementState.previousMousePosition = { x: event.clientX, y: event.clientY };
     });
 
@@ -152,16 +195,36 @@ const setupEventListeners = () => {
         'KeyS': 'backward',
         'KeyA': 'left',
         'KeyD': 'right',
-        'KeySpace': 'up',
-        'KeyC': 'down'
+        'Space': 'up',
+        'KeyC': 'down',
+        'ShiftLeft': 'shift',
+        'ShiftRight': 'shift',
+        'KeyX': 'x',
     };
 
     document.addEventListener('keydown', (event) => {
-        if (keyMap[event.code]) movementState.keys[keyMap[event.code]] = true;
+        if (keyMap[event.code]) {
+            movementState.keys[keyMap[event.code]] = true;
+            if (["forward","backward","left","right","up","down"].includes(keyMap[event.code])) {
+                cameraTargetLock = false; // Disable camera target lock on WASD
+                freeLook = true;
+                controls.enabled = false;
+            }
+        }
     });
 
     document.addEventListener('keyup', (event) => {
         if (keyMap[event.code]) movementState.keys[keyMap[event.code]] = false;
+    });
+
+    // Optionally, re-enable camera target lock on mouse click (focus on object)
+    canvas.addEventListener('dblclick', () => {
+        cameraTargetLock = true;
+        freeLook = false;
+        controls.enabled = true;
+        // Reset yaw/pitch to match camera orientation
+        yaw = camera.rotation.y;
+        pitch = camera.rotation.x;
     });
 
     // Window resize
@@ -178,12 +241,14 @@ const setupEventListeners = () => {
     window.addEventListener('dblclick', () => {
         const fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement;
         if (!fullscreenElement) {
-            canvas.requestFullscreen?.() || canvas.webkitRequestFullscreen?.();
+            wrapper.requestFullscreen?.() || wrapper.webkitRequestFullscreen?.();
         } else {
             document.exitFullscreen?.() || document.webkitExitFullscreen?.();
         }
     });
 };
+
+setupEventListeners();
 
 /**
  * Renderer
@@ -220,13 +285,12 @@ const ambientLightFolder = gui.addFolder('Ambient Light');
 ambientLightFolder.add(ambientLight, 'intensity').min(0).max(2).step(0.01);
 ambientLightFolder.addColor(ambientLight, 'color');
 
+const gravityFolder = gui.addFolder("Gravity");
+gravityFolder.add(CONSTANTS, 'EARTH_MOON_GRAVITY').min(1e-12).max(1e-9).step(1e-12).name('Earth-Moon Gravity');
 
 // Create Earth group
 const earthGroup = new THREE.Group();
 scene.add(earthGroup);
-
-// Set initial Earth position
-earthGroup.position.set(SCALE_FACTORS.EARTH_ORBIT_RADIUS, 0, 0);
 
 // Add orbit controls
 const controls = new OrbitControls(camera, canvas);
@@ -240,6 +304,102 @@ const sun = new Sun();
 const sunGroup = sun.getSun();
 sunGroup.position.set(0, 0, 0);
 scene.add(sunGroup);
+
+// --- Solar Eruptions ---
+class SolarEruptionManager {
+    constructor(sunGroup, scene) {
+        this.sunGroup = sunGroup;
+        this.scene = scene;
+        this.eruptions = [];
+        this.lastEruption = 0;
+        this.eruptionInterval = 2 + Math.random() * 2; // seconds
+        this.particleCount = 120;
+        this.particleLifetime = 2.5; // seconds
+        this.sunRadius = 18; // Increased for bigger eruptions
+    }
+
+    spawnEruption() {
+        // Random point on Sun's surface (spherical coordinates)
+        const theta = Math.random() * 2 * Math.PI;
+        const phi = Math.acos(2 * Math.random() - 1);
+        const x = this.sunRadius * Math.sin(phi) * Math.cos(theta);
+        const y = this.sunRadius * Math.sin(phi) * Math.sin(theta);
+        const z = this.sunRadius * Math.cos(phi);
+        const origin = new THREE.Vector3(x, y, z);
+        // Outward direction
+        const normal = origin.clone().normalize();
+
+        // Particle geometry
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(this.particleCount * 3);
+        const velocities = [];
+        for (let i = 0; i < this.particleCount; i++) {
+            // Start at eruption origin
+            positions[i * 3] = x;
+            positions[i * 3 + 1] = y;
+            positions[i * 3 + 2] = z;
+            // Outward velocity with some random spread
+            const spread = 0.7 + Math.random() * 0.6;
+            const velocity = normal.clone().multiplyScalar(6 * spread)
+                .add(new THREE.Vector3(
+                    (Math.random() - 0.5) * 2,
+                    (Math.random() - 0.5) * 2,
+                    (Math.random() - 0.5) * 2
+                ));
+            velocities.push(velocity);
+        }
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        // Particle material
+        const material = new THREE.PointsMaterial({
+            color: 0xffcc33,
+            size: 2.5, // Increased for bigger particles
+            transparent: true,
+            opacity: 0.85,
+            depthWrite: false
+        });
+        const points = new THREE.Points(geometry, material);
+        this.scene.add(points);
+        this.eruptions.push({
+            points,
+            velocities,
+            startTime: performance.now() / 1000,
+            geometry,
+            material
+        });
+    }
+
+    update(delta) {
+        const now = performance.now() / 1000;
+        // Spawn new eruption if interval passed
+        if (now - this.lastEruption > this.eruptionInterval) {
+            this.spawnEruption();
+            this.lastEruption = now;
+            this.eruptionInterval = 2 + Math.random() * 2;
+        }
+        // Update all eruptions
+        for (let i = this.eruptions.length - 1; i >= 0; i--) {
+            const eruption = this.eruptions[i];
+            const elapsed = now - eruption.startTime;
+            const positions = eruption.geometry.attributes.position.array;
+            for (let j = 0; j < this.particleCount; j++) {
+                positions[j * 3] += eruption.velocities[j].x * delta;
+                positions[j * 3 + 1] += eruption.velocities[j].y * delta;
+                positions[j * 3 + 2] += eruption.velocities[j].z * delta;
+            }
+            eruption.geometry.attributes.position.needsUpdate = true;
+            // Fade out
+            eruption.material.opacity = Math.max(0, 0.85 * (1 - elapsed / this.particleLifetime));
+            if (elapsed > this.particleLifetime) {
+                this.scene.remove(eruption.points);
+                eruption.geometry.dispose();
+                eruption.material.dispose();
+                this.eruptions.splice(i, 1);
+            }
+        }
+    }
+}
+
+const solarEruptions = new SolarEruptionManager(sunGroup, scene);
 
 // Debug folder for Sun
 const sunFolder = gui.addFolder('Sun');
@@ -257,23 +417,24 @@ earthGroupFolder.add(earthGroup.rotation, 'z').min(0).max(Math.PI * 2).step(0.01
 // Load textures
 const textureLoader = new THREE.TextureLoader();
 
+
 // Create Earth with textures
 const earthGeometry = new THREE.SphereGeometry(6.371, 64, 64); // Earth radius in thousands of km
 const earthMaterial = new THREE.MeshStandardMaterial({
-    map: textureLoader.load('/textures/Earth/Albedo.jpg', (texture) => {
+    map: textureLoader.load('textures/Earth/Albedo.jpg', (texture) => {
         texture.wrapS = THREE.RepeatWrapping;
         texture.wrapT = THREE.RepeatWrapping;
         texture.flipY = true;
         texture.anisotropy = 16;
     }),
-    bumpMap: textureLoader.load('/textures/Earth/Bump.jpg', (texture) => {
+    bumpMap: textureLoader.load('textures/Earth/Bump.jpg', (texture) => {
         texture.wrapS = THREE.RepeatWrapping;
         texture.wrapT = THREE.RepeatWrapping;
         texture.flipY = true;
         texture.anisotropy = 16;
     }),
     bumpScale: 0.05,
-    roughnessMap: textureLoader.load('/textures/Earth/Albedo.jpg', (texture) => {
+    roughnessMap: textureLoader.load('textures/Earth/Albedo.jpg', (texture) => {
         texture.wrapS = THREE.RepeatWrapping;
         texture.wrapT = THREE.RepeatWrapping;
         texture.flipY = true;
@@ -303,8 +464,6 @@ const cloudMaterial = new THREE.MeshStandardMaterial({
     opacity: 0.4
 });
 const clouds = new THREE.Mesh(cloudGeometry, cloudMaterial);
-// Set initial cloud rotation to match Earth's rotation
-clouds.rotation.y = earth.rotation.y;
 earthGroup.add(clouds);
 
 // Debug folder for clouds
@@ -397,59 +556,9 @@ orbitsFolder.add({ speed: 1 }, 'speed', 0, 10000, 0.1).onChange((value) => {
     timeScale = value; // Use the time scale to control all orbital speeds
 }).name('Orbit Speed');
 
-// Create Moon
-const moonGeometry = new THREE.SphereGeometry(1.737, 128, 128); // Moon radius in thousands of km
-const moonMaterial = new THREE.MeshStandardMaterial({
-    map: textureLoader.load('/textures/Moon/moonmap4k.jpg', (texture) => {
-        texture.wrapS = THREE.RepeatWrapping;
-        texture.wrapT = THREE.RepeatWrapping;
-        texture.flipY = true;
-        texture.anisotropy = 16;
-    }),
-    bumpMap: textureLoader.load('/textures/Moon/moonbump4k.jpg', (texture) => {
-        texture.wrapS = THREE.RepeatWrapping;
-        texture.wrapT = THREE.RepeatWrapping;
-        texture.flipY = true;
-        texture.anisotropy = 16;
-    }),
-    bumpScale: 0.025,
-    roughness: 0.8,
-    metalness: 0.1
-});
-
-const moon = new THREE.Mesh(moonGeometry, moonMaterial);
-scene.add(moon);
-
-// Initialize moon physics properties
-const G = 6.67430e-11; // Gravitational constant
-const M_EARTH = 5.972e24; // Earth mass
-const M_MOON = 7.342e22; // Moon mass
-const SCALE_FACTOR = 1e-6; // Scale factor for visualization
-const VELOCITY_SCALE = 1e-6; // Reduced velocity scale
-
-// Set initial Moon position relative to Earth
-moon.position.set(
-    earthGroup.position.x + SCALE_FACTORS.MOON_ORBIT_RADIUS,
-    earthGroup.position.y,
-    earthGroup.position.z
-);
-
-// Calculate initial velocity for circular orbit
-const orbitalSpeed = Math.sqrt((G * M_EARTH) / (SCALE_FACTORS.MOON_ORBIT_RADIUS * SCALE_FACTOR)) * VELOCITY_SCALE;
-// Set initial velocity perpendicular to the Earth-Moon direction
-const initialVelocity = new THREE.Vector3(0, 0, orbitalSpeed);
-moon.userData = {
-    initialized: true,
-    velocity: initialVelocity,
-    mass: M_MOON
-};
-
 // Create ISS group
 const issGroup = new THREE.Group();
-earthGroup.add(issGroup);
-
-// Set initial ISS position
-issGroup.position.set(SCALE_FACTORS.ISS_ORBIT_RADIUS, 0, 0);
+earthGroup.add(issGroup); // Add to Earth group instead of scene
 
 // Load ISS model
 const gltfLoader = new GLTFLoader();
@@ -459,7 +568,7 @@ gltfLoader.load(
     'models/International Space Station.glb',
     (gltf) => {
         issModel = gltf.scene;
-        issModel.scale.set(0.005, 0.005, 0.005); // Adjust scale as needed
+        issModel.scale.set(0.03, 0.03, 0.03); // Adjust scale as needed
         issGroup.add(issModel);
     }
 );
@@ -468,6 +577,70 @@ gltfLoader.load(
 const issOrbitRadius = 6.771; // ISS orbits at ~400km above Earth's surface (Earth radius 6.371 + 0.4)
 let issOrbitSpeed = 2 * Math.PI / 5400; // ISS orbits once every 90 minutes (5400 seconds)
 let issOrbitalAngle = 0;
+
+// Set initial ISS position
+issGroup.position.set(issOrbitRadius, 0, 0);
+
+
+// Create HST group
+const hstGroup = new THREE.Group();
+earthGroup.add(hstGroup); // Add HST to earthGroup
+let hstModel;
+
+gltfLoader.load(
+    'models/Hubble Space Telescope.glb',
+    (gltf) => {
+        hstModel = gltf.scene;
+        hstModel.scale.set(0.00005, 0.00005, 0.00005); // Match ISS scale
+        hstGroup.add(hstModel);
+    }
+);
+
+// HST orbit parameters
+const hstOrbitRadius = 6.921; // HST orbits at ~550km above Earth's surface (Earth radius 6.371 + 0.55)
+let hstOrbitSpeed = 2 * Math.PI / 5760; // HST orbits every ~96 minutes (5760 seconds)
+let hstOrbitalAngle = 0;
+
+// Set initial HST position
+hstGroup.position.set(hstOrbitRadius, 0, 0);
+
+// Create Moon
+const moonRadius = 1.7374; // Moon radius in thousands of km (to scale with Earth's 6.371)
+const moonGeometry = new THREE.SphereGeometry(moonRadius, 128, 128); // To-scale Moon
+const moonMaterial = new THREE.MeshStandardMaterial({
+    map: textureLoader.load('textures/Moon/moonmap4k.jpg', (texture) => {
+        texture.wrapS = THREE.RepeatWrapping;
+        texture.wrapT = THREE.RepeatWrapping;
+        texture.flipY = true;
+        texture.anisotropy = 16;
+    }),
+    bumpMap: textureLoader.load('textures/Moon/moonbump4k.jpg', (texture) => {
+        texture.wrapS = THREE.RepeatWrapping;
+        texture.wrapT = THREE.RepeatWrapping;
+        texture.flipY = true;
+        texture.anisotropy = 16;
+    }),
+    bumpScale: 0.025,
+    roughness: 0.8,
+    metalness: 0.1,
+    normalScale: new THREE.Vector2(1, 1)
+});
+
+const moon = new THREE.Mesh(moonGeometry, moonMaterial);
+earthGroup.add(moon); // Add Moon to Earth group
+moon.position.set(SCALE_FACTORS.MOON_ORBIT_RADIUS, 0, 0); // Set initial position
+
+
+const minOrbit = 6.371 + CONSTANTS.LEO + moonRadius; // Earth's radius in thousands of km
+const maxOrbit = 6.371 + CONSTANTS.GEOMAX + moonRadius; // Earth's radius in thousands of km
+
+
+const moonFolder = gui.addFolder('Moon');
+moonFolder.add(moon.material, 'bumpScale', 0, 2, 0.001);
+moonFolder.add(CONSTANTS, 'MOON_MASS').min(1e20).max(1e26).step(1e22).name('Moon Mass (kg)');
+moonFolder.add(SCALE_FACTORS, 'MOON_ORBIT_RADIUS').min(minOrbit).max(maxOrbit).step(0.001).name('Moon Orbit a (thousands km)');
+moonFolder.add(CONSTANTS, 'MOON_ECCENTRICITY').min(0).max(0.2).step(0.0001).name('Moon Eccentricity');
+
 
 // Camera target management
 const cameraTargetManager = {
@@ -483,9 +656,18 @@ const cameraTargetManager = {
     init() {
         this.targets = {
             Sun: sunGroup.position,
-            Earth: earthGroup.position.clone(), // Clone the position to avoid reference issues
+            Earth: earthGroup.position,
             Moon: new THREE.Vector3(),
-            ISS: new THREE.Vector3()
+            ISS: new THREE.Vector3(),
+            HST: new THREE.Vector3(),
+            Mercury: new THREE.Vector3(),
+            Venus: new THREE.Vector3(),
+            Mars: new THREE.Vector3(),
+            Jupiter: new THREE.Vector3(),
+            Saturn: new THREE.Vector3(),
+            Uranus: new THREE.Vector3(),
+            Neptune: new THREE.Vector3(),
+            Pluto: new THREE.Vector3()
         };
 
         // Set initial target
@@ -500,206 +682,107 @@ const cameraTargetManager = {
                 this.isTransitioning = true;
                 this.startPosition.copy(camera.position);
                 this.startTarget.copy(controls.target);
+                // Force cameraTargetLock and orbit mode on target change
+                cameraTargetLock = true;
+                freeLook = false;
+                controls.enabled = true;
+                // Reset yaw/pitch to match camera orientation
+                yaw = camera.rotation.y;
+                pitch = camera.rotation.x;
             }
         });
-    },
-
-    calculateCameraPosition(target) {
-        console.log('Calculating camera position for target:', this.currentTarget);
-        console.log('Target position:', target);
-
-        let cameraPosition;
-        if (this.currentTarget === 'Sun') {
-            cameraPosition = new THREE.Vector3(0, 0, 100);
-        } else if (this.currentTarget === 'ISS') {
-            cameraPosition = target.clone().add(new THREE.Vector3(0, 5, 10));
-        } else if (this.currentTarget === 'Moon') {
-            cameraPosition = target.clone().add(new THREE.Vector3(0, 5, 15));
-        } else if (this.currentTarget === 'Earth') {
-            // Adjusted Earth camera position
-            cameraPosition = target.clone().add(new THREE.Vector3(0, 20, 50));
-        } else {
-            cameraPosition = target.clone().add(new THREE.Vector3(0, 50 * 0.4, 50));
-        }
-
-        console.log('Final camera position:', cameraPosition);
-        return cameraPosition;
     },
 
     update() {
-        // Physics constants
-        const dt = 0.016 * timeScale; // Time step
-        const FORCE_SCALE = 1e-20; // Scale factor for force
-
-        // Update Earth's position in orbit
-        const earthOrbitAngle = (Date.now() / 1000) * (2 * Math.PI / ORBITAL_PERIODS.EARTH);
-        earthGroup.position.x = Math.cos(earthOrbitAngle) * SCALE_FACTORS.EARTH_ORBIT_RADIUS;
-        earthGroup.position.z = Math.sin(earthOrbitAngle) * SCALE_FACTORS.EARTH_ORBIT_RADIUS;
-
         // Update target positions
-        this.targets.Earth.copy(earthGroup.position);
-        this.targets.Sun.copy(sunGroup.position);
-        issGroup.getWorldPosition(this.targets.ISS);
-
-        // Get Earth and Moon objects
-        const earth = earthGroup.children[0];
-        const moon = scene.children.find(child => child instanceof THREE.Mesh && child !== earth);
-        moon.getWorldPosition(this.targets.Moon);
-
-        // Calculate distance vector between Earth and Moon
-        const distance = new THREE.Vector3().subVectors(moon.position, earthGroup.position);
-        const distanceMagnitude = distance.length();
-
-        // Calculate gravitational force with adjustable multiplier
-        const baseForce = (G * M_EARTH * M_MOON) / (distanceMagnitude * distanceMagnitude);
-        const forceMagnitude = baseForce * FORCE_SCALE * physicsDebug.gravityForce;
-        const forceDirection = distance.normalize();
-        const force = forceDirection.multiplyScalar(forceMagnitude);
-
-        // Calculate acceleration
-        const moonAcceleration = force.clone().divideScalar(M_MOON).negate();
-        
-        // Log the values for debugging
-        console.log('Physics Debug:', {
-            gravityForce: physicsDebug.gravityForce,
-            baseForce: baseForce,
-            forceMagnitude: forceMagnitude,
-            acceleration: moonAcceleration.length(),
-            distance: distanceMagnitude,
-            velocity: moon.userData.velocity.length()
-        });
-
-        // Update velocity
-        const moonVelocityChange = moonAcceleration.clone().multiplyScalar(dt);
-        moon.userData.velocity.add(moonVelocityChange);
-
-        // Update position
-        const moonPositionChange = moon.userData.velocity.clone().multiplyScalar(dt);
-        moon.position.add(moonPositionChange);
-
-        // Reset moon if it gets too far from Earth
-        const maxDistance = SCALE_FACTORS.MOON_ORBIT_RADIUS * 2;
-        if (distanceMagnitude > maxDistance) {
-            console.warn('Moon too far from Earth, resetting...');
-            moon.position.set(
-                earthGroup.position.x + SCALE_FACTORS.MOON_ORBIT_RADIUS,
-                earthGroup.position.y,
-                earthGroup.position.z
-            );
-            const orbitalSpeed = Math.sqrt((G * M_EARTH) / (SCALE_FACTORS.MOON_ORBIT_RADIUS * SCALE_FACTOR)) * VELOCITY_SCALE;
-            // Set velocity perpendicular to the Earth-Moon direction
-            const tangentDirection = new THREE.Vector3(-distance.z, 0, distance.x).normalize();
-            moon.userData.velocity = tangentDirection.multiplyScalar(orbitalSpeed);
-        }
-
-        // Update debug vectors
-        if (physicsDebug.showForceVector) {
-            debugVectors.force.setDirection(forceDirection);
-            debugVectors.force.setLength(forceMagnitude * 1000);
-            debugVectors.force.position.copy(moon.position);
-        }
-        debugVectors.force.visible = physicsDebug.showForceVector;
-
-        if (physicsDebug.showVelocityVector) {
-            debugVectors.velocity.setDirection(moon.userData.velocity.normalize());
-            debugVectors.velocity.setLength(moon.userData.velocity.length() * 1000);
-            debugVectors.velocity.position.copy(moon.position);
-        }
-        debugVectors.velocity.visible = physicsDebug.showVelocityVector;
-
-        if (physicsDebug.showAccelerationVector) {
-            debugVectors.acceleration.setDirection(moonAcceleration.normalize());
-            debugVectors.acceleration.setLength(moonAcceleration.length() * 10000);
-            debugVectors.acceleration.position.copy(moon.position);
-        }
-        debugVectors.acceleration.visible = physicsDebug.showAccelerationVector;
-
-        // Add debug info to panel
-        if (physicsDebug.showEnergy || physicsDebug.showAngularMomentum) {
-            const kineticEnergy = 0.5 * M_MOON * moon.userData.velocity.lengthSq();
-            const potentialEnergy = -(G * M_EARTH * M_MOON) / distanceMagnitude * physicsDebug.gravityForce;
-            const totalEnergy = kineticEnergy + potentialEnergy;
-            
-            const angularMomentum = distance.clone().cross(moon.userData.velocity).multiplyScalar(M_MOON);
-            
-            debugPanel.innerHTML = `
-                ${physicsDebug.showEnergy ? `Total Energy: ${totalEnergy.toExponential(2)} J<br>` : ''}
-                ${physicsDebug.showAngularMomentum ? `Angular Momentum: ${angularMomentum.length().toExponential(2)} kg⋅m²/s<br>` : ''}
-                Force Magnitude: ${forceMagnitude.toExponential(2)} N<br>
-                Acceleration: ${moonAcceleration.length().toExponential(2)} m/s²<br>
-                Distance: ${distanceMagnitude.toFixed(2)} units<br>
-                Velocity: ${moon.userData.velocity.length().toExponential(2)} m/s<br>
-                Gravity Multiplier: ${physicsDebug.gravityForce.toFixed(2)}x
-            `;
-        }
-
-        // Update Moon trail
-        if (physicsDebug.showTrail) {
-            const positions = moonTrail.geometry.attributes.position.array;
-            
-            // Shift all points back by one position
-            for (let i = positions.length - 3; i > 0; i -= 3) {
-                positions[i] = positions[i - 3];
-                positions[i + 1] = positions[i - 2];
-                positions[i + 2] = positions[i - 1];
-            }
-            
-            // Add new point at the beginning
-            positions[0] = moon.position.x;
-            positions[1] = moon.position.y;
-            positions[2] = moon.position.z;
-            
-            // Update the number of points to draw
-            const newCount = Math.min(moonTrail.geometry.drawRange.count + 1, physicsDebug.trailLength);
-            moonTrail.geometry.setDrawRange(0, newCount);
-            moonTrail.geometry.attributes.position.needsUpdate = true;
-            moonTrail.geometry.computeBoundingSphere();
-        }
-        moonTrail.visible = physicsDebug.showTrail;
-
-        // Update Earth's rotation
-        earth.rotation.y += (2 * Math.PI / (23.93 * 3600)) * dt;
-        // Keep clouds rotation synchronized with Earth's rotation
-        clouds.rotation.y = earth.rotation.y;
-
-        // Update Moon's rotation (tidally locked)
-        moon.rotation.y += (2 * Math.PI / (27.32 * 24 * 3600)) * dt;
-
-        // Update target positions
-        this.targets.Earth = earth.position;
+        this.targets.Earth = earthGroup.position;
         this.targets.Sun = sunGroup.position;
         moon.getWorldPosition(this.targets.Moon);
         issGroup.getWorldPosition(this.targets.ISS);
+        hstGroup.getWorldPosition(this.targets.HST);
+
+        // Update Mercury position
+        const mercury = planets.getPlanets().children[0];
+        const venus = planets.getPlanets().children[1];
+        const mars = planets.getPlanets().children[2];
+        const jupiter = planets.getPlanets().children[3];
+        const saturn = planets.getPlanets().children[4];
+        const uranus = planets.getPlanets().children[5];
+        const neptune = planets.getPlanets().children[6];
+        const pluto = planets.getPlanets().children[7];
+        if (mercury) {
+            mercury.getWorldPosition(this.targets.Mercury);
+        }
+        if (venus) {
+            venus.getWorldPosition(this.targets.Venus);
+        }
+        if (mars) {
+            mars.getWorldPosition(this.targets.Mars);
+        }
+        if (jupiter) {
+            jupiter.getWorldPosition(this.targets.Jupiter);
+        }
+        if (saturn) {
+            saturn.getWorldPosition(this.targets.Saturn);
+        }
+        if (uranus) {
+            uranus.getWorldPosition(this.targets.Uranus);
+        }
+        if (neptune) {
+            neptune.getWorldPosition(this.targets.Neptune);
+        }
+        if (pluto) {
+            pluto.getWorldPosition(this.targets.Pluto);
+        }
+
 
         // Handle camera transition
         if (this.isTransitioning) {
             const target = this.targets[this.currentTarget];
             const desiredPosition = this.calculateCameraPosition(target);
-            
-            // Validate target position
-            if (target && !isNaN(target.x) && !isNaN(target.y) && !isNaN(target.z)) {
-                camera.position.lerp(desiredPosition, this.TRANSITION_SPEED);
-                this.targetPosition.lerp(target, this.TRANSITION_SPEED);
-                controls.target.copy(this.targetPosition);
+            const distanceToTarget = camera.position.distanceTo(desiredPosition);
+            const targetDistance = this.targetPosition.distanceTo(target);
 
-                const distanceToTarget = camera.position.distanceTo(desiredPosition);
-                const targetDistance = this.targetPosition.distanceTo(target);
+            camera.position.lerp(desiredPosition, this.TRANSITION_SPEED);
+            this.targetPosition.lerp(target, this.TRANSITION_SPEED);
+            controls.target.copy(this.targetPosition);
 
-                if (distanceToTarget < this.DISTANCE_THRESHOLD && targetDistance < this.DISTANCE_THRESHOLD) {
-                    this.isTransitioning = false;
-                    controls.enabled = true;
-                    camera.position.copy(desiredPosition);
-                    this.targetPosition.copy(target);
-                    controls.target.copy(target);
-                }
-            } else {
-                console.warn('Invalid target position detected');
+            if (distanceToTarget < this.DISTANCE_THRESHOLD && targetDistance < this.DISTANCE_THRESHOLD) {
                 this.isTransitioning = false;
+                controls.enabled = true;
+                camera.position.copy(desiredPosition);
+                this.targetPosition.copy(target);
+                controls.target.copy(target);
+            } else {
                 controls.enabled = true;
             }
         }
+    },
+
+    calculateCameraPosition(target) {
+        if (this.currentTarget === 'Sun') return new THREE.Vector3(0, 0, 100);
+        if (this.currentTarget === 'ISS') return target.clone().add(new THREE.Vector3(0, 5, 10));
+        if (this.currentTarget === 'Moon') return target.clone().add(new THREE.Vector3(0, 10, 20));
+        if (this.currentTarget === 'Mercury') return target.clone().add(new THREE.Vector3(0, 15 * 0.4, 15));
+        if (this.currentTarget === 'Venus') return target.clone().add(new THREE.Vector3(0, 15 * 0.4, 15));
+        if (this.currentTarget === 'Mars') return target.clone().add(new THREE.Vector3(0, 20 * 0.4, 20));
+        if (this.currentTarget === 'Jupiter') return target.clone().add(new THREE.Vector3(0, 200 * 0.4, 200));
+        if (this.currentTarget === 'Saturn') return target.clone().add(new THREE.Vector3(0, 180 * 0.4, 180));
+        if (this.currentTarget === 'Uranus') return target.clone().add(new THREE.Vector3(0, 100 * 0.4, 100));
+        if (this.currentTarget === 'Neptune') return target.clone().add(new THREE.Vector3(0, 100 * 0.4, 100));
+        if (this.currentTarget === 'Pluto') return target.clone().add(new THREE.Vector3(0, 10 * 0.4, 10));
+        return target.clone().add(new THREE.Vector3(0, 50 * 0.4, 50));
     }
 };
+
+        const saturnFolder = gui.addFolder('Saturn');
+
+        const saturn = planets.saturn;
+
+        saturnFolder.add(saturn.rotation, 'x').name('rotationX').min(0).max(Math.PI * 2).step(0.01);
+        saturnFolder.add(saturn.rotation, 'y').name('rotationY').min(0).max(Math.PI * 2).step(0.01);
+        saturnFolder.add(saturn.rotation, 'z').name('rotationZ').min(0).max(Math.PI * 2).step(0.01);
+
 
 // Initialize camera target manager
 cameraTargetManager.init();
@@ -709,8 +792,23 @@ function renderLoop() {
     requestAnimationFrame(renderLoop);
     const delta = Math.max(clock.getDelta(), 0.0001);
 
+    const earthWorldPos = new THREE.Vector3();
+    const moonWorldPos = new THREE.Vector3();
+    earth.getWorldPosition(earthWorldPos);
+    moon.getWorldPosition(moonWorldPos);
+    // console.log('Earth-Moon distance:', earthWorldPos.distanceTo(moonWorldPos));
+
+    // Update solar eruptions
+    solarEruptions.update(delta);
+
     // Update planets and celestial bodies
-    cameraTargetManager.update();
+    updateOrbits(delta);
+    if (cameraTargetLock) {
+        controls.enabled = true;
+        cameraTargetManager.update();
+    } else {
+        controls.enabled = false;
+    }
     updateControls();
 
     // Render scene
@@ -721,16 +819,36 @@ function renderLoop() {
 let simulationTime = new Date();
 let timeScale = 1; // 1 second of real time = 1 second of simulation time
 
+// Add these at the top-level, outside any function:
+let moonPhase = 0; // Fraction of orbit completed (0 to 1)
+let lastMoonPeriod = null;
+let lastMoonPhaseUpdateTime = null; // in seconds
+
+// Helper to update phase and time when parameters change
+function updateMoonPhaseOnParamChange(currentTime, oldPeriod, newPeriod) {
+    // Calculate phase at the moment of change
+    if (lastMoonPhaseUpdateTime === null) {
+        lastMoonPhaseUpdateTime = currentTime;
+        return;
+    }
+    // How much phase has elapsed since last update
+    const elapsed = currentTime - lastMoonPhaseUpdateTime;
+    moonPhase = (moonPhase + elapsed / oldPeriod) % 1;
+    lastMoonPhaseUpdateTime = currentTime;
+    lastMoonPeriod = newPeriod;
+}
+
 // Add after the renderer setup
 const timeDisplay = document.createElement('div');
 timeDisplay.style.position = 'absolute';
+timeDisplay.style.zIndex = '9999';
 timeDisplay.style.top = '10px';
 timeDisplay.style.left = '10px';
 timeDisplay.style.color = 'white';
 timeDisplay.style.fontFamily = 'Arial';
 timeDisplay.style.fontSize = '16px';
 timeDisplay.style.textShadow = '2px 2px 4px rgba(0,0,0,0.5)';
-document.body.appendChild(timeDisplay);
+wrapper.appendChild(timeDisplay);
 
 // Add time scale control to GUI
 const timeFolder = gui.addFolder('Time Controls');
@@ -837,47 +955,47 @@ const ORBITAL_ELEMENTS = {
 function calculateOrbitalPosition(planet, time) {
     const period = ORBITAL_PERIODS[planet.toUpperCase()];
     const elements = ORBITAL_ELEMENTS[planet.toUpperCase()];
-    
+
     if (!period || !elements) {
         console.warn(`Missing orbital data for ${planet}`);
         return { x: 0, y: 0, radius: 0 };
     }
-    
+
     // Calculate mean anomaly
     const meanMotion = 2 * Math.PI / period;
     const meanAnomaly = (meanMotion * time) % (2 * Math.PI);
-    
+
     // Solve Kepler's equation for eccentric anomaly
     let eccentricAnomaly = meanAnomaly;
     for (let i = 0; i < 10; i++) {
-        const nextEccentricAnomaly = eccentricAnomaly - 
-            (eccentricAnomaly - elements.e * Math.sin(eccentricAnomaly) - meanAnomaly) / 
+        const nextEccentricAnomaly = eccentricAnomaly -
+            (eccentricAnomaly - elements.e * Math.sin(eccentricAnomaly) - meanAnomaly) /
             (1 - elements.e * Math.cos(eccentricAnomaly));
         if (Math.abs(nextEccentricAnomaly - eccentricAnomaly) < 1e-6) break;
         eccentricAnomaly = nextEccentricAnomaly;
     }
-    
+
     // Calculate true anomaly
     const trueAnomaly = 2 * Math.atan(
-        Math.sqrt((1 + elements.e) / (1 - elements.e)) * 
+        Math.sqrt((1 + elements.e) / (1 - elements.e)) *
         Math.tan(eccentricAnomaly / 2)
     );
-    
+
     // Calculate radius
-    const radius = elements.a * (1 - elements.e * elements.e) / 
-                  (1 + elements.e * Math.cos(trueAnomaly));
-    
+    const radius = elements.a * (1 - elements.e * elements.e) /
+        (1 + elements.e * Math.cos(trueAnomaly));
+
     // Calculate position
     const x = radius * Math.cos(trueAnomaly + elements.lp * Math.PI / 180);
     const y = radius * Math.sin(trueAnomaly + elements.lp * Math.PI / 180);
-    
+
     return { x, y, radius };
 }
 
 // Function to update all positions based on date
 function updatePositionsFromDate(date, delta) {
     const time = date.getTime() / 1000; // Convert to seconds
-    
+
     // Update planet positions
     Object.entries(ORBITAL_ELEMENTS).forEach(([planet, elements]) => {
         const planetObj = planets[planet.toLowerCase()];
@@ -894,164 +1012,474 @@ function updatePositionsFromDate(date, delta) {
     earthGroup.position.x = earthPos.x * SCALE_FACTORS.AU_TO_UNITS;
     earthGroup.position.z = earthPos.y * SCALE_FACTORS.AU_TO_UNITS;
 
-    // Only update Moon position if gravity force is at default value
-    if (physicsDebug.gravityForce === 1.0) {
-        const moonAngle = (time * (2 * Math.PI / ORBITAL_PERIODS.MOON)) % (2 * Math.PI);
-        const moonX = SCALE_FACTORS.MOON_ORBIT_RADIUS * Math.cos(moonAngle);
-        const moonZ = SCALE_FACTORS.MOON_ORBIT_RADIUS * Math.sin(moonAngle);
-        moon.position.set(moonX, 0, moonZ);
-        moonOrbitalAngle = moonAngle;
+    // --- Moon's elliptical orbit using Kepler's laws ---
+    const M_earth = 5.972e24; // kg
+    const M_moon = CONSTANTS.MOON_MASS; // kg
+    const a = SCALE_FACTORS.MOON_ORBIT_RADIUS; // semi-major axis in thousands of km
+    const e = CONSTANTS.MOON_ECCENTRICITY; // eccentricity
+    const a_meters = a * 1e6;
+    const G = CONSTANTS.EARTH_MOON_GRAVITY;
+    const mu = G * (M_earth + M_moon); // standard gravitational parameter
+    const moonPeriod = 2 * Math.PI * Math.sqrt(Math.pow(a_meters, 3) / mu);
+
+    // On first run, initialize
+    if (lastMoonPeriod === null || lastMoonPhaseUpdateTime === null) {
+        lastMoonPeriod = moonPeriod;
+        lastMoonPhaseUpdateTime = time;
+        moonPhase = 0;
     }
+    // If period changed (parameters changed), update phase and time
+    if (moonPeriod !== lastMoonPeriod) {
+        updateMoonPhaseOnParamChange(time, lastMoonPeriod, moonPeriod);
+    }
+    // Advance phase based on elapsed time since last update
+    const elapsed = time - lastMoonPhaseUpdateTime;
+    const currentPhase = (moonPhase + elapsed / moonPeriod) % 1;
+    // Mean anomaly
+    const M = currentPhase * 2 * Math.PI;
+    // Solve Kepler's equation for eccentric anomaly E
+    let E = M;
+    for (let i = 0; i < 10; i++) {
+        E = E - (E - e * Math.sin(E) - M) / (1 - e * Math.cos(E));
+    }
+    // True anomaly (ν)
+    const nu = 2 * Math.atan2(Math.sqrt(1 + e) * Math.sin(E / 2), Math.sqrt(1 - e) * Math.cos(E / 2));
+    // Distance from focus (Earth) to Moon
+    const r_orbit = a * (1 - e * e) / (1 + e * Math.cos(nu));
+    // Position in orbital plane (assuming orbit in x-z plane)
+    const moonX = r_orbit * Math.cos(nu);
+    const moonZ = r_orbit * Math.sin(nu);
+    moon.position.set(moonX, 0, moonZ);
+    moonOrbitalAngle = nu;
+    // Make the Moon's rotation tidally locked
+    moon.rotation.y = nu;
 
     // Update ISS position relative to Earth
     issOrbitalAngle += (2 * Math.PI / 5400) * delta * timeScale; // ISS orbits every 90 minutes
-    const issX = SCALE_FACTORS.ISS_ORBIT_RADIUS * Math.cos(issOrbitalAngle);
+    const issX = - (SCALE_FACTORS.ISS_ORBIT_RADIUS * Math.cos(issOrbitalAngle));
     const issZ = SCALE_FACTORS.ISS_ORBIT_RADIUS * Math.sin(issOrbitalAngle);
     const issY = SCALE_FACTORS.ISS_ORBIT_RADIUS * Math.sin(issOrbitalAngle) * 0.1;
-    
     issGroup.position.set(issX, issY, issZ);
-    
     if (issModel) {
         issModel.rotation.y = issOrbitalAngle + Math.PI / 2;
     }
+
+    // Update HST position relative to Earth
+    hstOrbitalAngle += (2 * Math.PI / 5760) * delta * timeScale; // HST orbits every ~96 minutes
+    const hstX = hstOrbitRadius * Math.cos(hstOrbitalAngle);
+    const hstZ = hstOrbitRadius * Math.sin(hstOrbitalAngle);
+    const hstY = hstOrbitRadius * Math.sin(hstOrbitalAngle) * 0.1;
+    hstGroup.position.set(hstX, hstY, hstZ);
+    if (hstModel) {
+        hstModel.rotation.y = hstOrbitalAngle + Math.PI / 2;
+    }
+}
+
+// Update the updateOrbits function
+function updateOrbits(delta) {
+    // Update simulation time
+    simulationTime = new Date(simulationTime.getTime() + delta * timeScale * 1000);
+
+    // Update time display
+    timeDisplay.textContent = `Simulation Time: ${simulationTime.toLocaleString()}`;
+    // Calculate Moon-Earth distance in km
+    const moonDistanceKm = SCALE_FACTORS.MOON_ORBIT_RADIUS * 1000;
+    let orbitType = '';
+    if (moonDistanceKm - 6371 - moonRadius * 1000 < 2000) {
+        orbitType = 'LEO';
+    } else if (moonDistanceKm - 6371 - moonRadius * 1000 < 35786) {
+        orbitType = 'MEO';
+    } else {
+        orbitType = 'GEO';
+    }
+    timeDisplay.textContent += ` | Moon Orbit Type: ${orbitType}`;
+    timeDisplay.textContent += ` | Moon-Earth Distance: ${Math.round(moonDistanceKm - 6371 - moonRadius * 1000)} km`;
+
+    // Update positions based on current date
+    updatePositionsFromDate(simulationTime, delta);
+
+    // Update rotations with time scaling
+    earth.rotation.y += delta * timeScale * (2 * Math.PI / ROTATION_PERIODS.EARTH);
+    clouds.rotation.y += delta * timeScale * (2 * Math.PI / ROTATION_PERIODS.EARTH);
+    moon.rotation.y += delta * timeScale * (2 * Math.PI / ORBITAL_PERIODS.MOON); // Moon is tidally locked
+
+    // Update planet rotations with time scaling
+    Object.entries(planets).forEach(([planetName, planet]) => {
+        if (planet && ROTATION_PERIODS[planetName.toUpperCase()]) {
+            const rotationPeriod = ROTATION_PERIODS[planetName.toUpperCase()];
+            const direction = planetName.toLowerCase() === 'venus' ? -1 : 1;
+            planet.rotation.y += direction * delta * timeScale * (2 * Math.PI / rotationPeriod);
+        }
+    });
 }
 
 function updateControls() {
-    // Update camera position based on movement state
-    if (movementState.keys.forward) camera.position.z -= CONSTANTS.MOVE_SPEED;
-    if (movementState.keys.backward) camera.position.z += CONSTANTS.MOVE_SPEED;
-    if (movementState.keys.left) camera.position.x -= CONSTANTS.MOVE_SPEED;
-    if (movementState.keys.right) camera.position.x += CONSTANTS.MOVE_SPEED;
-    if (movementState.keys.up) camera.position.y += CONSTANTS.MOVE_SPEED;
-    if (movementState.keys.down) camera.position.y -= CONSTANTS.MOVE_SPEED;
-
-    // Update orbit controls
-    controls.update();
+    if (freeLook) {
+        // FPS-style movement: move relative to camera direction
+        let moveSpeed = CONSTANTS.MOVE_SPEED;
+        if (movementState.keys.shift) moveSpeed *= 3;
+        if (movementState.keys.x) moveSpeed /= 6;
+        const direction = new THREE.Vector3();
+        camera.getWorldDirection(direction);
+        direction.y = 0; // lock to horizontal plane for WASD
+        direction.normalize();
+        const right = new THREE.Vector3();
+        right.crossVectors(camera.up, direction).normalize();
+        if (movementState.keys.forward) camera.position.addScaledVector(direction, moveSpeed);
+        if (movementState.keys.backward) camera.position.addScaledVector(direction, -moveSpeed);
+        if (movementState.keys.left) camera.position.addScaledVector(right, moveSpeed);
+        if (movementState.keys.right) camera.position.addScaledVector(right, -moveSpeed);
+        if (movementState.keys.up) camera.position.y += moveSpeed;
+        if (movementState.keys.down) camera.position.y -= moveSpeed;
+    }
+    // Mouse look for FPS mode
+    if (freeLook && movementState.isDragging) {
+        // Mouse drag rotates camera
+        // (handled in mousedown/mousemove above)
+    }
+    // Orbit controls only if not in free look
+    if (!freeLook) {
+        controls.update();
+    }
 }
 
 // Create clock for timing
 const clock = new THREE.Clock();
 
-// Create debug visualization objects
-const debugVectors = {
-    force: new THREE.ArrowHelper(
-        new THREE.Vector3(),
-        new THREE.Vector3(),
-        1,
-        0xff0000
-    ),
-    velocity: new THREE.ArrowHelper(
-        new THREE.Vector3(),
-        new THREE.Vector3(),
-        1,
-        0x00ff00
-    ),
-    acceleration: new THREE.ArrowHelper(
-        new THREE.Vector3(),
-        new THREE.Vector3(),
-        1,
-        0x0000ff
-    )
-};
-
-// Add debug vectors to scene instead of earthGroup
-Object.values(debugVectors).forEach(vector => scene.add(vector));
-
-// Create Moon trail
-const moonTrailGeometry = new THREE.BufferGeometry();
-const moonTrailMaterial = new THREE.LineBasicMaterial({
-    color: 0x00ff00,
-    transparent: true,
-    opacity: 0.5
-});
-
-// Initialize trail positions array
-const trailLength = 1000; // Maximum number of points in the trail
-const positions = new Float32Array(trailLength * 3); // 3 values (x,y,z) per point
-
-// Initialize all positions to the Moon's initial position
-const initialMoonPosition = new THREE.Vector3(
-    earthGroup.position.x + SCALE_FACTORS.MOON_ORBIT_RADIUS,
-    earthGroup.position.y,
-    earthGroup.position.z
-);
-for (let i = 0; i < trailLength * 3; i += 3) {
-    positions[i] = initialMoonPosition.x;
-    positions[i + 1] = initialMoonPosition.y;
-    positions[i + 2] = initialMoonPosition.z;
-}
-
-moonTrailGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-moonTrailGeometry.setDrawRange(0, 1); // Start with one point drawn
-moonTrailGeometry.computeBoundingSphere();
-
-const moonTrail = new THREE.Line(moonTrailGeometry, moonTrailMaterial);
-scene.add(moonTrail); // Add to scene instead of earthGroup
-
-// Create debug panel
-const debugPanel = document.createElement('div');
-debugPanel.style.position = 'absolute';
-debugPanel.style.top = '50px';
-debugPanel.style.left = '10px';
-debugPanel.style.color = 'white';
-debugPanel.style.fontFamily = 'Arial';
-debugPanel.style.fontSize = '14px';
-debugPanel.style.textShadow = '2px 2px 4px rgba(0,0,0,0.5)';
-debugPanel.style.backgroundColor = 'rgba(0,0,0,0.5)';
-debugPanel.style.padding = '10px';
-debugPanel.style.borderRadius = '5px';
-document.body.appendChild(debugPanel);
-
-// Add physics debug controls to GUI
-const physicsFolder = gui.addFolder('Physics Debug');
-const physicsDebug = {
-    showForceVector: true,
-    showVelocityVector: true,
-    showAccelerationVector: true,
-    showTrail: true,
-    trailLength: 100,
-    forceScale: 1e-20,
-    showOrbitalElements: true,
-    showEnergy: true,
-    showAngularMomentum: true,
-    gravityForce: 1.0 // New control for gravity force
-};
-
-physicsFolder.add(physicsDebug, 'showForceVector').name('Show Force Vector');
-physicsFolder.add(physicsDebug, 'showVelocityVector').name('Show Velocity Vector');
-physicsFolder.add(physicsDebug, 'showAccelerationVector').name('Show Acceleration Vector');
-physicsFolder.add(physicsDebug, 'showTrail').name('Show Moon Trail');
-physicsFolder.add(physicsDebug, 'trailLength', 10, 500).name('Trail Length');
-physicsFolder.add(physicsDebug, 'forceScale', 1e-20, 100, 0.01).name('Force Scale');
-physicsFolder.add(physicsDebug, 'showOrbitalElements').name('Show Orbital Elements');
-physicsFolder.add(physicsDebug, 'showEnergy').name('Show Energy');
-physicsFolder.add(physicsDebug, 'showAngularMomentum').name('Show Angular Momentum');
-physicsFolder.add(physicsDebug, 'gravityForce', 0.1, 10.0, 0.1).name('Gravity Force Multiplier').onChange((value) => {
-    // Reset moon position and velocity when gravity force changes
-    const moon = scene.children.find(child => child instanceof THREE.Mesh && child !== earthGroup.children[0]);
-    if (moon) {
-        moon.position.set(
-            earthGroup.position.x + SCALE_FACTORS.MOON_ORBIT_RADIUS,
-            earthGroup.position.y,
-            earthGroup.position.z
-        );
-        const orbitalSpeed = Math.sqrt((G * M_EARTH) / (SCALE_FACTORS.MOON_ORBIT_RADIUS * SCALE_FACTOR)) * VELOCITY_SCALE;
-        // Set velocity perpendicular to the Earth-Moon direction
-        const distance = new THREE.Vector3().subVectors(moon.position, earthGroup.position);
-        const tangentDirection = new THREE.Vector3(-distance.z, 0, distance.x).normalize();
-        moon.userData.velocity = tangentDirection.multiplyScalar(orbitalSpeed);
-    }
-});
-
 // Initialize
 renderLoop();
 
-// Add debug logging function at the top of the file
-function debugLog(category, message, data = null) {
-    const timestamp = new Date().toISOString();
-    const logMessage = `[${timestamp}] [${category}] ${message}`;
-    console.log(logMessage);
-    if (data) {
-        console.log('Data:', data);
+// Add ambience audio playback
+const AMBIENCE_NORMAL = 0.2;
+const AMBIENCE_DUCKED = 0.05;
+const MUSIC_NORMAL = 0.2;
+const MUSIC_DUCKED = 0.075;
+const QUOTE_NORMAL = 0.2;
+
+const ambienceAudio = document.createElement('audio');
+ambienceAudio.src = 'audio/ambience/ambience.mp3'; // Path to your ambience file
+ambienceAudio.loop = true;
+ambienceAudio.volume = AMBIENCE_NORMAL;
+ambienceAudio.autoplay = true;
+document.body.appendChild(ambienceAudio);
+
+// Ensure playback starts on user interaction (for browser autoplay policy)
+// window.addEventListener('click', () => {
+//     if (ambienceAudio.paused) {
+//         ambienceAudio.play();
+//         ambienceAudio.volume = AMBIENCE_NORMAL;
+//     }
+// });
+ 
+const musicFiles = [
+    // 'music/03. The Last of Us.mp3',
+    // 'music/[01] - God of War.mp3',
+    'music/Can You Hear The Music(MP3_320K).mp3',
+];
+
+// Create the audio element for music
+const musicAudio = document.createElement('audio');
+musicAudio.volume = MUSIC_NORMAL;
+musicAudio.autoplay = false;
+musicAudio.loop = false; // Play each track once
+document.body.appendChild(musicAudio);
+
+// === QUOTE AUDIO ===
+const quoteFiles = [
+    'quotes/in_the_beginning.wav',
+    'quotes/one_small_step.wav',
+    'quotes/entire_world.wav',
+    'quotes/mankind_began.wav',
+    'quotes/eagle_has_landed.wav',
+    'quotes/JFK.mp3',
+    'quotes/launch_full.wav'
+];
+const quoteAudio = document.createElement('audio');
+quoteAudio.volume = QUOTE_NORMAL;
+quoteAudio.autoplay = false;
+quoteAudio.loop = false;
+document.body.appendChild(quoteAudio);
+
+// --- AUDIO STATE MANAGEMENT ---
+let isMusicPlaying = false;
+let isQuotePlaying = false;
+let pendingMusicTimeout = null;
+
+function fadeAudioVolume(audio, targetVolume, duration = 1000) {
+    const startVolume = audio.volume;
+    const startTime = Date.now();
+    const interval = 20; // ms
+    if (audio._fadeTimer) {
+        clearTimeout(audio._fadeTimer);
+        audio._fadeTimer = null;
+    }
+    function step() {
+        const elapsed = Date.now() - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        audio.volume = startVolume + (targetVolume - startVolume) * progress;
+        if (progress < 1) {
+            audio._fadeTimer = setTimeout(step, interval);
+        } else {
+            audio.volume = targetVolume;
+            if (audio._fadeTimer) {
+                clearTimeout(audio._fadeTimer);
+                audio._fadeTimer = null;
+            }
+        }
+    }
+    step();
+}
+    
+function updateVolumes() {
+    // Always clear fade timers before starting a new fade
+    if (ambienceAudio._fadeTimer) {
+        clearTimeout(ambienceAudio._fadeTimer);
+        ambienceAudio._fadeTimer = null;
+    }
+    if (isQuotePlaying) {
+        fadeAudioVolume(ambienceAudio, AMBIENCE_DUCKED);
+        musicAudio.volume = MUSIC_DUCKED;
+        quoteAudio.volume = QUOTE_NORMAL;
+    } else if (isMusicPlaying) {
+        fadeAudioVolume(ambienceAudio, AMBIENCE_DUCKED);
+        musicAudio.volume = MUSIC_NORMAL;
+        quoteAudio.volume = QUOTE_NORMAL;
+    } else {
+        fadeAudioVolume(ambienceAudio, AMBIENCE_NORMAL);
+        musicAudio.volume = MUSIC_NORMAL;
+        quoteAudio.volume = QUOTE_NORMAL;
     }
 }
+
+// --- MUSIC LOGIC ---
+function playRandomMusic() {
+    if (isQuotePlaying) {
+        // If a quote is playing, schedule music to play 5s after quote ends
+        if (!pendingMusicTimeout) {
+            pendingMusicTimeout = setTimeout(() => {
+                if (!isQuotePlaying) {
+                    playRandomMusic();
+                }
+                pendingMusicTimeout = null;
+            }, 5000);
+        }
+        return;
+    }
+    const randomIndex = Math.floor(Math.random() * musicFiles.length);
+    musicAudio.src = `audio/${musicFiles[randomIndex]}`;
+    musicAudio.play();
+}
+
+function scheduleNextMusic() {
+    const delay = 60000 + Math.random() * 30000;
+    setTimeout(() => {
+        playRandomMusic();
+    }, delay);
+}
+
+musicAudio.addEventListener('play', () => {
+    isMusicPlaying = true;
+    updateVolumes();
+});
+musicAudio.addEventListener('ended', () => {
+    isMusicPlaying = false;
+    updateVolumes();
+    // Safety: if neither music nor quote is playing, restore ambience
+    setTimeout(() => {
+        if (!isMusicPlaying && !isQuotePlaying) {
+            fadeAudioVolume(ambienceAudio, AMBIENCE_NORMAL);
+        }
+    }, 100);
+    scheduleNextMusic();
+});
+
+// --- QUOTE LOGIC ---
+function playRandomQuote() {
+    if (isQuotePlaying) return; // Don't overlap quotes
+    isQuotePlaying = true;
+    updateVolumes();
+    // If music is playing, duck it (handled by updateVolumes)
+    const randomIndex = Math.floor(Math.random() * quoteFiles.length);
+    quoteAudio.src = `audio/${quoteFiles[randomIndex]}`;
+    quoteAudio.play();
+}
+
+quoteAudio.addEventListener('play', () => {
+    isQuotePlaying = true;
+    updateVolumes();
+});
+quoteAudio.addEventListener('ended', () => {
+    isQuotePlaying = false;
+    updateVolumes();
+    // Safety: if neither music nor quote is playing, restore ambience
+    setTimeout(() => {
+        if (!isMusicPlaying && !isQuotePlaying) {
+            fadeAudioVolume(ambienceAudio, AMBIENCE_NORMAL);
+        }
+    }, 100);
+    // If music was scheduled to play after quote, play it now (after 5s delay)
+    if (pendingMusicTimeout) {
+        clearTimeout(pendingMusicTimeout);
+        pendingMusicTimeout = setTimeout(() => {
+            playRandomMusic();
+            pendingMusicTimeout = null;
+        }, 5000);
+    }
+});
+
+// Optionally, start the first track after a random delay
+scheduleNextMusic();
+
+// === Space/Time/Alien Quotes ===
+const spaceQuotes = [
+  { text: "To confine our attention to terrestrial matters would be to limit the human spirit.", author: "Stephen Hawking" },
+  { text: "The Earth is the cradle of humanity, but mankind cannot stay in the cradle forever.", author: "Konstantin Tsiolkovsky" },
+  { text: "Somewhere, something incredible is waiting to be known.", author: "Carl Sagan" },
+  { text: "We are made of star-stuff. We are a way for the universe to know itself.", author: "Carl Sagan" },
+  { text: "The universe is under no obligation to make sense to you.", author: "Neil deGrasse Tyson" },
+  { text: "Two possibilities exist: either we are alone in the Universe or we are not. Both are equally terrifying.", author: "Arthur C. Clarke" },
+  { text: "Time is an illusion.", author: "Albert Einstein" },
+  { text: "Across the sea of space, the stars are other suns.", author: "Carl Sagan" },
+  { text: "The cosmos is within us. We are made of star-stuff.", author: "Carl Sagan" },
+  { text: "I don't pretend we have all the answers. But the questions are certainly worth thinking about.", author: "Arthur C. Clarke" },
+  { text: "If aliens visit us, the outcome would be much as when Columbus landed in America, which didn’t turn out well for the Native Americans.", author: "Stephen Hawking" },
+  { text: "Somewhere, something incredible is waiting to be known.", author: "Carl Sagan" },
+  { text: "We are an impossibility in an impossible universe.", author: "Ray Bradbury" },
+  { text: "The universe is a pretty big place. If it's just us, seems like an awful waste of space.", author: "Carl Sagan" },
+  { text: "We are not alone.", author: "The X-Files" },
+  { text: "Mankind was born on Earth. It was never meant to die here.", author: "Interstellar" },
+  { text: "The nitrogen in our DNA, the calcium in our teeth, the iron in our blood, the carbon in our apple pies were made in the interiors of collapsing stars.", author: "Carl Sagan" },
+  { text: "For small creatures such as we, the vastness is bearable only through love.", author: "Carl Sagan" },
+  { text: "The important achievement of Apollo was demonstrating that humanity is not forever chained to this planet and our visions go rather further than that and our opportunities are unlimited.", author: "Neil Armstrong" },
+  { text: "The sky calls to us. If we do not destroy ourselves, we will one day venture to the stars.", author: "Carl Sagan" },
+  { text: "We are just an advanced breed of monkeys on a minor planet of a very average star. But we can understand the Universe. That makes us something very special.", author: "Stephen Hawking" },
+  { text: "The universe is full of magical things patiently waiting for our wits to grow sharper.", author: "Eden Phillpotts" },
+  { text: "Somewhere, something incredible is waiting to be known.", author: "Carl Sagan" },
+  { text: "The greatest enemy of knowledge is not ignorance, it is the illusion of knowledge.", author: "Stephen Hawking" },
+  { text: "We are travelers on a cosmic journey, stardust, swirling and dancing in the eddies and whirlpools of infinity.", author: "Paulo Coelho" },
+  { text: "The universe is not only stranger than we imagine, it is stranger than we can imagine.", author: "J.B.S. Haldane" },
+  { text: "We are a way for the cosmos to know itself.", author: "Carl Sagan" },
+  { text: "The surface of the Earth is the shore of the cosmic ocean.", author: "Carl Sagan" },
+  { text: "We are all in the gutter, but some of us are looking at the stars.", author: "Oscar Wilde" },
+  { text: "The universe seems neither benign nor hostile, merely indifferent.", author: "Carl Sagan" },
+  { text: "The universe is a pretty big place. If it's just us, seems like an awful waste of space.", author: "Carl Sagan" },
+  { text: "We are the cosmos made conscious and life is the means by which the universe understands itself.", author: "Brian Cox" },
+  { text: "The Earth is a very small stage in a vast cosmic arena.", author: "Carl Sagan" },
+  { text: "We are stardust brought to life, then empowered by the universe to figure itself out—and we have only just begun.", author: "Neil deGrasse Tyson" },
+  { text: "We are the legacy of 15 billion years of cosmic evolution.", author: "Carl Sagan" },
+  { text: "The cosmos is all that is or ever was or ever will be.", author: "Carl Sagan" },
+  { text: "We are a way for the universe to know itself.", author: "Carl Sagan" },
+  { text: "Somewhere, something incredible is waiting to be known.", author: "Carl Sagan" },
+];
+
+// Create and style the quote div
+const quoteDiv = document.createElement('div');
+quoteDiv.style.position = 'absolute';
+quoteDiv.style.zIndex = '9999';
+quoteDiv.style.bottom = '10px';
+quoteDiv.style.left = '50%';
+quoteDiv.style.transform = 'translateX(-50%)';
+quoteDiv.style.padding = '18px 32px';
+// quoteDiv.style.borderRadius = '24px';
+// quoteDiv.style.background = 'rgba(30, 30, 40, 0.35)';
+// quoteDiv.style.backdropFilter = 'blur(8px)';
+quoteDiv.style.color = 'white';
+quoteDiv.style.fontFamily = 'Segoe UI, Arial, sans-serif';
+quoteDiv.style.fontSize = '1.2rem';
+quoteDiv.style.textAlign = 'center';
+// quoteDiv.style.boxShadow = '0 4px 24px 0 rgba(0,0,0,0.15)';
+quoteDiv.style.opacity = '0';
+quoteDiv.style.pointerEvents = 'none';
+quoteDiv.style.transition = 'opacity 5s cubic-bezier(.4,0,.2,1)';
+wrapper.appendChild(quoteDiv);
+
+function showRandomQuote() {
+  const { text, author } = spaceQuotes[Math.floor(Math.random() * spaceQuotes.length)];
+  quoteDiv.innerHTML = `“${text}”<br><span style="font-size:0.85rem;opacity:0.7;">— ${author}</span>`;
+  quoteDiv.style.opacity = '1';
+  setTimeout(() => {
+    quoteDiv.style.opacity = '0';
+  }, 10000);
+}
+
+// Play a quote every 30-50 seconds
+setInterval(playRandomQuote, 30000 + Math.random() * 20000);
+// Show a quote every 40 seconds
+setInterval(showRandomQuote, 40000);
+// Show the first quote after a short delay
+setTimeout(showRandomQuote, 2000);
+
+// === DID YOU KNOW FACTS ===
+const didYouKnowFacts = [
+  "A day on Venus is longer than a year on Venus.",
+  "There are more stars in the universe than grains of sand on all the beaches on Earth.",
+  "The observable universe is about 93 billion light-years in diameter.",
+  "Neutron stars can spin at a rate of 600 rotations per second.",
+  "A teaspoon of a neutron star would weigh about 6 billion tons on Earth.",
+  "If you could travel at the speed of light, it would still take over 4 years to reach the nearest star, Proxima Centauri.",
+  "The International Space Station travels at about 28,000 kilometers per hour.",
+  "The Hubble Space Telescope has helped determine the age of the universe to be about 13.8 billion years.",
+  "The largest known star, UY Scuti, is over 1,700 times the diameter of the Sun.",
+  "Black holes can \"evaporate\" over time due to Hawking radiation.",
+  "The Milky Way galaxy is on a collision course with the Andromeda galaxy.",
+  "There are rogue planets drifting through space unattached to any star.",
+  "The coldest known place in the universe is the Boomerang Nebula, at -272°C.",
+  "Some exoplanets orbit their stars in just a few hours.",
+  "The Voyager 1 spacecraft is the most distant human-made object from Earth.",
+  "Time passes slower in stronger gravitational fields, a phenomenon known as gravitational time dilation.",
+  "The universe is expanding, and the rate of expansion is accelerating.",
+  "There may be more universes beyond our own, according to some theories of cosmology.",
+  "The Sun makes up 99.86% of the mass in our solar system.",
+  "A year on Mercury is just 88 Earth days long.",
+  "The Great Red Spot on Jupiter is a storm that has been raging for at least 350 years.",
+  "The Moon is slowly drifting away from Earth at a rate of about 3.8 cm per year.",
+  "Some scientists estimate there could be billions of Earth-like planets in our galaxy alone.",
+  "The human body is made of stardust—elements formed in the cores of stars.",
+  "The closest galaxy to us, Andromeda, is 2.5 million light-years away.",
+  "The coldest temperature ever recorded in the universe is just a fraction of a degree above absolute zero.",
+  "The largest volcano in the solar system is Olympus Mons on Mars, nearly three times the height of Mount Everest.",
+  "A day on Mars is only about 40 minutes longer than a day on Earth.",
+  "The universe has no center and no edge, according to current cosmological models.",
+  "Alien life may exist in forms we can't even imagine, possibly based on silicon or ammonia instead of carbon and water."
+];
+
+// Create and style the Did You Know box
+const didYouKnowDiv = document.createElement('div');
+didYouKnowDiv.style.position = 'absolute';
+didYouKnowDiv.style.zIndex = '9999';
+didYouKnowDiv.style.top = '-80px';
+didYouKnowDiv.style.left = '10px';
+didYouKnowDiv.style.width = '340px';
+didYouKnowDiv.style.maxWidth = '90vw';
+didYouKnowDiv.style.padding = '18px 28px 18px 24px';
+didYouKnowDiv.style.border = '2px solid white';
+didYouKnowDiv.style.borderRadius = '18px';
+didYouKnowDiv.style.background = 'rgba(0, 0, 0, 0)';
+didYouKnowDiv.style.backdropFilter = 'blur(12px)';
+didYouKnowDiv.style.color = '#FFFFFF';
+didYouKnowDiv.style.fontFamily = 'Segoe UI, Arial, sans-serif';
+didYouKnowDiv.style.fontSize = '1.05rem';
+didYouKnowDiv.style.textAlign = 'left';
+didYouKnowDiv.style.boxShadow = '0 4px 24px 0 rgba(0,0,0,0.18)';
+didYouKnowDiv.style.opacity = '0';
+didYouKnowDiv.style.pointerEvents = 'none';
+didYouKnowDiv.style.transition = 'opacity 1.5s cubic-bezier(.4,0,.2,1), top 1.5s cubic-bezier(.4,0,.2,1)';
+didYouKnowDiv.style.zIndex = '1000';
+didYouKnowDiv.innerHTML = '';
+wrapper.appendChild(didYouKnowDiv);
+
+function showDidYouKnowFact() {
+  const fact = didYouKnowFacts[Math.floor(Math.random() * didYouKnowFacts.length)];
+  didYouKnowDiv.innerHTML = `<span style="font-weight:bold;font-size:1.1rem;letter-spacing:0.5px;">Did you know?</span><br><span style="font-size:1rem;">${fact}</span>`;
+  didYouKnowDiv.style.top = '40px';
+  didYouKnowDiv.style.opacity = '1';
+  setTimeout(() => {
+    didYouKnowDiv.style.opacity = '0';
+    didYouKnowDiv.style.top = '-80px';
+  }, 12000);
+}
+
+// Show a new fact every 30-50 seconds, fade in/out from the top
+setInterval(showDidYouKnowFact, 30000 + Math.random() * 20000);
+// Show the first fact after a short delay
+setTimeout(showDidYouKnowFact, 3000);
