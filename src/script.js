@@ -34,16 +34,38 @@ const CONSTANTS = {
         EARTH: 365.25 * 24 * 3600 * 1000,
         MOON: 27.32 * 24 * 3600 * 1000,
         EARTH_ROTATION: 23.93 * 3600
-    }
+    },
+    ISS_MASS: 4.2e5,        // kg ~420,000 kg
+    HST_MASS: 1.11e4,       // kg ~11,100 kg
+    ISS_ECCENTRICITY: 0.001,
+    HST_ECCENTRICITY: 0.001
 };
 
 // Constants for scaling and timing
 const SCALE_FACTORS = {
     AU_TO_UNITS: 5000, // 1 AU = 5000 units
     EARTH_ORBIT_RADIUS: 5000, // Earth's orbit radius in our units
-    MOON_ORBIT_RADIUS: 38.44, // Moon's orbit radius in our units
+    MOON_ORBIT_RADIUS: 384.4, // Moon's orbit radius in our units (to-scale: 384,400 km)
     ISS_ORBIT_RADIUS: 6.771 // ISS orbit radius in our units
 };
+
+// Baseline values for adaptive orbit scaling (so stronger gravity/mass pulls objects closer)
+const BASELINE = {
+    mu0: CONSTANTS.EARTH_MOON_GRAVITY * (5.972e24 + CONSTANTS.MOON_MASS),
+    a0: SCALE_FACTORS.MOON_ORBIT_RADIUS,
+    issMu0: CONSTANTS.EARTH_MOON_GRAVITY * (5.972e24 + CONSTANTS.ISS_MASS),
+    issA0: 6.771,
+    hstMu0: CONSTANTS.EARTH_MOON_GRAVITY * (5.972e24 + CONSTANTS.HST_MASS),
+    hstA0: 6.921
+};
+
+// Smooth semi-major axes for continuous adjustments
+let moonSemiMajorAxis = SCALE_FACTORS.MOON_ORBIT_RADIUS; // thousands of km (to-scale)
+let issSemiMajorAxis = 6.771; // thousands of km
+let hstSemiMajorAxis = 6.921; // thousands of km
+const A_ADJUST_RATE = 0.3;
+
+
 
 // Orbital periods in seconds
 const ORBITAL_PERIODS = {
@@ -286,7 +308,7 @@ ambientLightFolder.add(ambientLight, 'intensity').min(0).max(2).step(0.01);
 ambientLightFolder.addColor(ambientLight, 'color');
 
 const gravityFolder = gui.addFolder("Gravity");
-gravityFolder.add(CONSTANTS, 'EARTH_MOON_GRAVITY').min(1e-12).max(1e-9).step(1e-12).name('Earth-Moon Gravity');
+gravityFolder.add(CONSTANTS, 'EARTH_MOON_GRAVITY').min(1e-12).max(1e-9).step(1e-13).name('Earth-Moon Gravity');
 
 // Create Earth group
 const earthGroup = new THREE.Group();
@@ -401,11 +423,118 @@ class SolarEruptionManager {
 
 const solarEruptions = new SolarEruptionManager(sunGroup, scene);
 
+// Satellite collision effects using SolarEruptionManager pattern
+class SatelliteCollisionManager {
+    constructor(scene) {
+        this.scene = scene;
+        this.collisions = [];
+    }
+
+    spawnCollision(position, color, name) {
+        const particleCount = 200;
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(particleCount * 3);
+        const velocities = [];
+        
+        console.log(`${name} collision at world position:`, position);
+        
+        for (let i = 0; i < particleCount; i++) {
+            positions[i * 3] = position.x;
+            positions[i * 3 + 1] = position.y;
+            positions[i * 3 + 2] = position.z;
+            
+            // Create outward velocity from collision point (geyser effect)
+            const spread = 0.3 + Math.random() * 0.7; // 0.3 to 1.0
+            const velocity = new THREE.Vector3(
+                (Math.random() - 0.5) * 20 * spread,
+                (Math.random() - 0.5) * 20 * spread,
+                (Math.random() - 0.5) * 20 * spread
+            );
+            
+            // Add some upward bias for geyser effect
+            velocity.y += Math.random() * 10;
+            
+            velocities.push(velocity);
+        }
+        
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        const material = new THREE.PointsMaterial({
+            color: color,
+            size: 2,
+            transparent: true,
+            opacity: 0.9,
+            depthWrite: false
+        });
+        
+        const points = new THREE.Points(geometry, material);
+        this.scene.add(points);
+        
+        this.collisions.push({
+            points,
+            velocities,
+            startTime: performance.now() / 1000,
+            geometry,
+            material,
+            name
+        });
+        
+        console.log(`${name} collision effect spawned at`, position);
+    }
+
+    update(delta) {
+        const now = performance.now() / 1000;
+        for (let i = this.collisions.length - 1; i >= 0; i--) {
+            const collision = this.collisions[i];
+            const elapsed = now - collision.startTime;
+            const positions = collision.geometry.attributes.position.array;
+            
+            for (let j = 0; j < 200; j++) {
+                positions[j * 3] += collision.velocities[j].x * delta;
+                positions[j * 3 + 1] += collision.velocities[j].y * delta;
+                positions[j * 3 + 2] += collision.velocities[j].z * delta;
+            }
+            
+            collision.geometry.attributes.position.needsUpdate = true;
+            collision.material.opacity = Math.max(0, 0.9 * (1 - elapsed / 2.0));
+            
+            if (elapsed > 2.0) {
+                this.scene.remove(collision.points);
+                collision.geometry.dispose();
+                collision.material.dispose();
+                this.collisions.splice(i, 1);
+            }
+        }
+    }
+}
+
+const satelliteCollisions = new SatelliteCollisionManager(scene);
+
 // Debug folder for Sun
 const sunFolder = gui.addFolder('Sun');
 sunFolder.add(sun.sunLight, 'intensity', 0, 10, 0.01);
 sunFolder.add(sun.sunLight, 'decay', 0, 10, 0.01);
 sunFolder.add(sun.sunLight, 'distance', 0, 1000, 1);
+
+// Satellites GUI (ISS & HST)
+const satellitesFolder = gui.addFolder('Satellites');
+const satelliteControls = {
+    issMass: CONSTANTS.ISS_MASS,
+    hstMass: CONSTANTS.HST_MASS,
+    issScale: 0.03,
+    hstScale: 0.00005
+};
+satellitesFolder.add(satelliteControls, 'issMass').min(1e4).max(2e6).step(1e3).name('ISS Mass (kg)').onChange((v) => {
+    CONSTANTS.ISS_MASS = v;
+});
+satellitesFolder.add(satelliteControls, 'hstMass').min(1e3).max(1e6).step(1e2).name('HST Mass (kg)').onChange((v) => {
+    CONSTANTS.HST_MASS = v;
+});
+satellitesFolder.add(satelliteControls, 'issScale').min(0.001).max(2).step(0.001).name('ISS Scale').onChange((v) => {
+    if (issModel) issModel.scale.set(v, v, v);
+});
+satellitesFolder.add(satelliteControls, 'hstScale').min(0.00001).max(0.01).step(0.00001).name('HST Scale').onChange((v) => {
+    if (hstModel) hstModel.scale.set(v, v, v);
+});
 
 // Earth's axial tilt (23.5 degrees)
 earthGroup.rotation.z = (23.5 / 360) * Math.PI * 2;
@@ -556,9 +685,9 @@ orbitsFolder.add({ speed: 1 }, 'speed', 0, 10000, 0.1).onChange((value) => {
     timeScale = value; // Use the time scale to control all orbital speeds
 }).name('Orbit Speed');
 
-// Create ISS group
+// ISS
 const issGroup = new THREE.Group();
-earthGroup.add(issGroup); // Add to Earth group instead of scene
+earthGroup.add(issGroup);
 
 // Load ISS model
 const gltfLoader = new GLTFLoader();
@@ -568,41 +697,55 @@ gltfLoader.load(
     'models/International Space Station.glb',
     (gltf) => {
         issModel = gltf.scene;
-        issModel.scale.set(0.03, 0.03, 0.03); // Adjust scale as needed
+        issModel.scale.set(satelliteControls.issScale, satelliteControls.issScale, satelliteControls.issScale);
         issGroup.add(issModel);
     }
 );
 
+// Create ISS group
 // ISS orbit parameters
 const issOrbitRadius = 6.771; // ISS orbits at ~400km above Earth's surface (Earth radius 6.371 + 0.4)
 let issOrbitSpeed = 2 * Math.PI / 5400; // ISS orbits once every 90 minutes (5400 seconds)
-let issOrbitalAngle = 0;
+// ISS state
+// Set initial ISS position (random around Earth)
+const randomAngleISS = Math.random() * 2 * Math.PI;
+let issOrbitalAngle = randomAngleISS;
 
-// Set initial ISS position
-issGroup.position.set(issOrbitRadius, 0, 0);
+issGroup.position.set(
+    6.771 * Math.cos(randomAngleISS),
+    0,
+    6.771 * Math.sin(randomAngleISS)
+);
 
 
-// Create HST group
+// HST
 const hstGroup = new THREE.Group();
-earthGroup.add(hstGroup); // Add HST to earthGroup
+earthGroup.add(hstGroup);
 let hstModel;
 
 gltfLoader.load(
     'models/Hubble Space Telescope.glb',
     (gltf) => {
         hstModel = gltf.scene;
-        hstModel.scale.set(0.00005, 0.00005, 0.00005); // Match ISS scale
+        hstModel.scale.set(satelliteControls.hstScale, satelliteControls.hstScale, satelliteControls.hstScale);
         hstGroup.add(hstModel);
     }
 );
-
+// Create ISS group
+// Create HST group
 // HST orbit parameters
 const hstOrbitRadius = 6.921; // HST orbits at ~550km above Earth's surface (Earth radius 6.371 + 0.55)
 let hstOrbitSpeed = 2 * Math.PI / 5760; // HST orbits every ~96 minutes (5760 seconds)
+// HST state
 let hstOrbitalAngle = 0;
 
-// Set initial HST position
-hstGroup.position.set(hstOrbitRadius, 0, 0);
+// Set initial HST position (random around Earth)
+const randomAngleHST = Math.random() * 2 * Math.PI;
+hstGroup.position.set(
+    6.921 * Math.cos(randomAngleHST),
+    0,
+    6.921 * Math.sin(randomAngleHST)
+);
 
 // Create Moon
 const moonRadius = 1.7374; // Moon radius in thousands of km (to scale with Earth's 6.371)
@@ -800,6 +943,9 @@ function renderLoop() {
 
     // Update solar eruptions
     solarEruptions.update(delta);
+    
+    // Update collision effects
+    satelliteCollisions.update(delta);
 
     // Update planets and celestial bodies
     updateOrbits(delta);
@@ -1012,13 +1158,26 @@ function updatePositionsFromDate(date, delta) {
     earthGroup.position.x = earthPos.x * SCALE_FACTORS.AU_TO_UNITS;
     earthGroup.position.z = earthPos.y * SCALE_FACTORS.AU_TO_UNITS;
 
-    // --- Moon's elliptical orbit using Kepler's laws ---
-    const M_earth = 5.972e24; // kg
     const M_moon = CONSTANTS.MOON_MASS; // kg
-    const a = SCALE_FACTORS.MOON_ORBIT_RADIUS; // semi-major axis in thousands of km
-    const e = CONSTANTS.MOON_ECCENTRICITY; // eccentricity
-    const a_meters = a * 1e6;
+    const M_earth = 5.972e24; // kg
     const G = CONSTANTS.EARTH_MOON_GRAVITY;
+    // --- Moon's elliptical orbit using Kepler's laws (Earth-centered) ---
+    // Adaptive semi-major axis target: stronger gravity or larger Moon mass reduces a
+    const muCurrent = G * (M_earth + M_moon);
+    // Scale a by sqrt(mu0/mu) so period sensitivity remains physical but allows shrink with higher mu
+    const aTarget = BASELINE.a0 * Math.sqrt(BASELINE.mu0 / muCurrent);
+    // Clamp target so perigee cannot go below Earth surface (touch)
+    const earthRadiusK = 6.371; // thousands of km
+    const moonRadiusK = 1.7374; // thousands of km
+    const minPerigee = earthRadiusK + moonRadiusK; // touching
+    const e = CONSTANTS.MOON_ECCENTRICITY; // eccentricity
+    const minAForTouch = minPerigee / (1 - Math.max(0.00001, e));
+    const aTargetClamped = Math.max(minAForTouch, aTarget);
+    // Smoothly approach target for continuous descent
+    const frameDelta = Math.max(delta, 0.0001);
+    moonSemiMajorAxis = THREE.MathUtils.lerp(moonSemiMajorAxis, aTargetClamped, 1 - Math.exp(-A_ADJUST_RATE * frameDelta));
+    const a = moonSemiMajorAxis; // semi-major axis in thousands of km
+    const a_meters = a * 1e6; // convert thousands of km to meters
     const mu = G * (M_earth + M_moon); // standard gravitational parameter
     const moonPeriod = 2 * Math.PI * Math.sqrt(Math.pow(a_meters, 3) / mu);
 
@@ -1044,34 +1203,95 @@ function updatePositionsFromDate(date, delta) {
     }
     // True anomaly (ν)
     const nu = 2 * Math.atan2(Math.sqrt(1 + e) * Math.sin(E / 2), Math.sqrt(1 - e) * Math.cos(E / 2));
-    // Distance from focus (Earth) to Moon
+    // Distance from focus to Moon (in thousands of km, same units as a)
     const r_orbit = a * (1 - e * e) / (1 + e * Math.cos(nu));
-    // Position in orbital plane (assuming orbit in x-z plane)
-    const moonX = r_orbit * Math.cos(nu);
-    const moonZ = r_orbit * Math.sin(nu);
+    // Place Earth at earthGroup origin; Moon orbits with Earth as focus
+    const dirX = Math.cos(nu);
+    const dirZ = Math.sin(nu);
+    const moonX = r_orbit * dirX;
+    const moonZ = r_orbit * dirZ;
     moon.position.set(moonX, 0, moonZ);
+    earth.position.set(0, 0, 0);
+    clouds.position.set(0, 0, 0);
+    atmosphere.position.set(0, 0, 0);
     moonOrbitalAngle = nu;
     // Make the Moon's rotation tidally locked
     moon.rotation.y = nu;
 
-    // Update ISS position relative to Earth
-    issOrbitalAngle += (2 * Math.PI / 5400) * delta * timeScale; // ISS orbits every 90 minutes
-    const issX = - (SCALE_FACTORS.ISS_ORBIT_RADIUS * Math.cos(issOrbitalAngle));
-    const issZ = SCALE_FACTORS.ISS_ORBIT_RADIUS * Math.sin(issOrbitalAngle);
-    const issY = SCALE_FACTORS.ISS_ORBIT_RADIUS * Math.sin(issOrbitalAngle) * 0.1;
-    issGroup.position.set(issX, issY, issZ);
-    if (issModel) {
-        issModel.rotation.y = issOrbitalAngle + Math.PI / 2;
+    // --- ISS Keplerian orbit with adaptive a ---
+    {
+        const eIss = Math.max(0, Math.min(0.1, CONSTANTS.ISS_ECCENTRICITY));
+        const muIss = G * (M_earth + (CONSTANTS.ISS_MASS || 0));
+        const aTargetIss = BASELINE.issA0 * Math.sqrt(BASELINE.issMu0 / muIss);
+        const earthRadiusK = 6.371;
+        const minPerigeeIss = earthRadiusK + 0.001;
+        const minAIss = minPerigeeIss / (1 - Math.max(0.00001, eIss));
+        const aIssClamped = Math.max(minAIss, aTargetIss);
+        const frameDelta = Math.max(delta, 0.0001);
+        issSemiMajorAxis = THREE.MathUtils.lerp(issSemiMajorAxis, aIssClamped, 1 - Math.exp(-A_ADJUST_RATE * frameDelta));
+        const periodIss = 2 * Math.PI * Math.sqrt(Math.pow(issSemiMajorAxis * 1e6, 3) / muIss);
+        issOrbitalAngle += (2 * Math.PI / periodIss) * (delta * timeScale);
+        let Eiss = issOrbitalAngle;
+        for (let i = 0; i < 5; i++) {
+            Eiss = Eiss - (Eiss - eIss * Math.sin(Eiss) - issOrbitalAngle) / (1 - eIss * Math.cos(Eiss));
+        }
+        const nuIss = 2 * Math.atan2(Math.sqrt(1 + eIss) * Math.sin(Eiss / 2), Math.sqrt(1 - eIss) * Math.cos(Eiss / 2));
+        const rIss = issSemiMajorAxis * (1 - eIss * eIss) / (1 + eIss * Math.cos(nuIss));
+        const issX = rIss * Math.cos(nuIss);
+        const issZ = rIss * Math.sin(nuIss);
+        const issY = rIss * Math.sin(nuIss) * 0.1;
+        issGroup.position.set(issX, issY, issZ);
+        if (issModel) issModel.rotation.y = nuIss + Math.PI / 2;
+        
+        // Check for Earth collision
+        const collisionThreshold = earthRadiusK + 0.08;
+        if (rIss <= collisionThreshold && !issGroup.userData.collided) {
+            console.log(`ISS COLLISION! Distance: ${rIss.toFixed(3)}, Threshold: ${collisionThreshold.toFixed(3)}`);
+            const worldPos = new THREE.Vector3();
+            issGroup.getWorldPosition(worldPos);
+            satelliteCollisions.spawnCollision(worldPos, 0xFFFF00, 'ISS');
+            issGroup.visible = false;
+            issModel = null;
+            issGroup.userData.collided = true;
+        }
     }
 
-    // Update HST position relative to Earth
-    hstOrbitalAngle += (2 * Math.PI / 5760) * delta * timeScale; // HST orbits every ~96 minutes
-    const hstX = hstOrbitRadius * Math.cos(hstOrbitalAngle);
-    const hstZ = hstOrbitRadius * Math.sin(hstOrbitalAngle);
-    const hstY = hstOrbitRadius * Math.sin(hstOrbitalAngle) * 0.1;
-    hstGroup.position.set(hstX, hstY, hstZ);
-    if (hstModel) {
-        hstModel.rotation.y = hstOrbitalAngle + Math.PI / 2;
+    // --- HST Keplerian orbit with adaptive a ---
+    {
+        const eHst = Math.max(0, Math.min(0.1, CONSTANTS.HST_ECCENTRICITY));
+        const muHst = G * (M_earth + (CONSTANTS.HST_MASS || 0));
+        const aTargetHst = BASELINE.hstA0 * Math.sqrt(BASELINE.hstMu0 / muHst);
+        const earthRadiusK = 6.371;
+        const minPerigeeHst = earthRadiusK + 0.001;
+        const minAHst = minPerigeeHst / (1 - Math.max(0.00001, eHst));
+        const aHstClamped = Math.max(minAHst, aTargetHst);
+        const frameDelta = Math.max(delta, 0.0001);
+        hstSemiMajorAxis = THREE.MathUtils.lerp(hstSemiMajorAxis, aHstClamped, 1 - Math.exp(-A_ADJUST_RATE * frameDelta));
+        const periodHst = 2 * Math.PI * Math.sqrt(Math.pow(hstSemiMajorAxis * 1e6, 3) / muHst);
+        hstOrbitalAngle += (2 * Math.PI / periodHst) * (delta * timeScale);
+        let Ehst = hstOrbitalAngle;
+        for (let i = 0; i < 5; i++) {
+            Ehst = Ehst - (Ehst - eHst * Math.sin(Ehst) - hstOrbitalAngle) / (1 - eHst * Math.cos(Ehst));
+        }
+        const nuHst = 2 * Math.atan2(Math.sqrt(1 + eHst) * Math.sin(Ehst / 2), Math.sqrt(1 - eHst) * Math.cos(Ehst / 2));
+        const rHst = hstSemiMajorAxis * (1 - eHst * eHst) / (1 + eHst * Math.cos(nuHst));
+        const hstX = rHst * Math.cos(nuHst);
+        const hstZ = rHst * Math.sin(nuHst);
+        const hstY = rHst * Math.sin(nuHst) * 0.1;
+        hstGroup.position.set(hstX, hstY, hstZ);
+        if (hstModel) hstModel.rotation.y = nuHst + Math.PI / 2;
+        
+        // Check for Earth collision
+        const collisionThreshold = earthRadiusK + 0.08;
+        if (rHst <= collisionThreshold && !hstGroup.userData.collided) {
+            console.log(`HST COLLISION! Distance: ${rHst.toFixed(3)}, Threshold: ${collisionThreshold.toFixed(3)}`);
+            const worldPos = new THREE.Vector3();
+            hstGroup.getWorldPosition(worldPos);
+            satelliteCollisions.spawnCollision(worldPos, 0xFFFF00, 'HST');
+            hstGroup.visible = false;
+            hstModel = null;
+            hstGroup.userData.collided = true;
+        }
     }
 }
 
@@ -1082,18 +1302,50 @@ function updateOrbits(delta) {
 
     // Update time display
     timeDisplay.textContent = `Simulation Time: ${simulationTime.toLocaleString()}`;
-    // Calculate Moon-Earth distance in km
-    const moonDistanceKm = SCALE_FACTORS.MOON_ORBIT_RADIUS * 1000;
+    // Calculate current Moon-Earth distance in km based on actual position
+    const currentMoonDistanceKm = moon.position.length() * 1000;
     let orbitType = '';
-    if (moonDistanceKm - 6371 - moonRadius * 1000 < 2000) {
+    if (currentMoonDistanceKm - 6371 - moonRadius * 1000 < 2000) {
         orbitType = 'LEO';
-    } else if (moonDistanceKm - 6371 - moonRadius * 1000 < 35786) {
+    } else if (currentMoonDistanceKm - 6371 - moonRadius * 1000 < 35786) {
         orbitType = 'MEO';
     } else {
         orbitType = 'GEO';
     }
+    
+    // Calculate actual distances from Earth center (accounting for Earth group position)
+    const earthWorldPos = new THREE.Vector3();
+    earthGroup.getWorldPosition(earthWorldPos);
+    
+    const hstWorldPos = new THREE.Vector3();
+    hstGroup.getWorldPosition(hstWorldPos);
+    const currentHstDistanceKm = earthWorldPos.distanceTo(hstWorldPos) * 1000;
+    
+    let hstOrbitType = '';
+    if (currentHstDistanceKm - 6371 < 2000) {
+        hstOrbitType = 'LEO';
+    } else if (currentHstDistanceKm - 6371 < 35786) {
+        hstOrbitType = 'MEO';
+    } else {
+        hstOrbitType = 'GEO';
+    }
+    
+    const issWorldPos = new THREE.Vector3();
+    issGroup.getWorldPosition(issWorldPos);
+    const currentIssDistanceKm = earthWorldPos.distanceTo(issWorldPos) * 1000;
+    
+    let issOrbitType = '';
+    if (currentIssDistanceKm - 6371 < 2000) {
+        issOrbitType = 'LEO';
+    } else if (currentIssDistanceKm - 6371 < 35786) {
+        issOrbitType = 'MEO';
+    } else {
+        issOrbitType = 'GEO';
+    }
     timeDisplay.textContent += ` | Moon Orbit Type: ${orbitType}`;
-    timeDisplay.textContent += ` | Moon-Earth Distance: ${Math.round(moonDistanceKm - 6371 - moonRadius * 1000)} km`;
+    timeDisplay.textContent += ` | Moon-Earth Distance: ${Math.round(currentMoonDistanceKm - 6371 - moonRadius * 1000)} km`;
+    timeDisplay.textContent += ` | HST-Earth Distance: ${Math.round(hstGroup.position.length() * 1000 - 6371)} km ${hstOrbitType}`;
+    timeDisplay.textContent += ` | ISS-Earth Distance: ${Math.round(issGroup.position.length() * 1000 - 6371)} km ${issOrbitType}`;
 
     // Update positions based on current date
     updatePositionsFromDate(simulationTime, delta);
